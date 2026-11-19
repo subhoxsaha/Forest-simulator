@@ -1,0 +1,8 @@
+{
+  "name": " Forest Growing Simulator pro",
+  "description": "An interactive 3D Forest Growing and Ecosystem Simulator utilizing high-fidelity low-poly procedural structures, moisture simulations, wildlife tracking, and dynamic eco-quests generated via Gemini AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
