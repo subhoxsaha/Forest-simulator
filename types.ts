@@ -27,6 +27,12 @@ export enum EcosystemType {
   DeadTree = 'DeadTree',
 }
 
+export type WeatherType = 'Sunny' | 'Raining' | 'Windy' | 'Autumn_Dew';
+
+export type SeasonType = 'spring' | 'summer' | 'autumn' | 'winter';
+
+export type CameraPreset = 'iso' | 'scenic' | 'top';
+
 export interface SpeciesConfig {
   type: EcosystemType;
   cost: number;
@@ -55,7 +61,7 @@ export interface CityStats {
   money: number; // Solar energy currency
   population: number; // Forest biomass score
   day: number;
-  weather: 'Sunny' | 'Raining' | 'Windy' | 'Autumn_Dew';
+  weather: WeatherType;
 }
 
 export interface AIGoal {
@@ -63,6 +69,7 @@ export interface AIGoal {
   targetType: 'biomass' | 'energy' | 'growth_stage' | 'species_count';
   targetValue: number;
   speciesType?: EcosystemType; // Species tracked if targetType is species_count or growth_stage
+  buildingType?: EcosystemType; // Legacy localStorage compatibility alias
   reward: number;
   completed: boolean;
 }

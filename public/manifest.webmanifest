@@ -1,0 +1,56 @@
+{
+  "id": "/",
+  "name": "Forest Growing Simulator pro",
+  "short_name": "EverGreen",
+  "description": "An interactive 3D Forest Growing and Ecosystem Simulator with procedural structures, moisture simulations, and dynamic eco-quests.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#064e3b",
+  "background_color": "#022c22",
+  "lang": "en",
+  "categories": ["games", "simulation", "education"],
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Launch Forest",
+      "short_name": "Forest",
+      "description": "Enter the 3D sanctuary",
+      "url": "/?source=shortcut_forest",
+      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Ecosystem Quests",
+      "short_name": "Quests",
+      "description": "Check current ecological goals",
+      "url": "/?source=shortcut_quests",
+      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192" }]
+    }
+  ]
+}

@@ -2,40 +2,14 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PolyCity AI 3D</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        /* Hide scrollbar for main view to act like a game canvas */
-        body { overflow: hidden; background-color: #0c4a6e; /* sky-900 */ }
-
-        /* Hide scrollbar for Chrome, Safari and Opera */
-        .no-scrollbar::-webkit-scrollbar {
-            display: none;
-        }
-        /* Hide scrollbar for IE, Edge and Firefox */
-        .no-scrollbar {
-            -ms-overflow-style: none;  /* IE and Edge */
-            scrollbar-width: none;  /* Firefox */
-        }
-    </style>
-<script type="importmap">
-{
-  "imports": {
-    "react/": "https://esm.sh/react@^19.2.0/",
-    "react": "https://esm.sh/react@^19.2.0",
-    "react-dom/": "https://esm.sh/react-dom@^19.2.0/",
-    "react-dom": "https://esm.sh/react-dom@^19.2.0",
-    "@google/genai": "https://esm.sh/@google/genai@^1.25.0",
-    "three": "https://esm.sh/three@^0.173.0",
-    "@react-three/fiber": "https://esm.sh/@react-three/fiber@^9.0.0",
-    "@react-three/drei": "https://esm.sh/@react-three/drei@^10.0.0"
-  }
-}
-</script>
-<link rel="stylesheet" href="/index.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Forest Growing Simulator Pro — EverGreen 3D</title>
+    <meta name="description" content="An interactive 3D Forest Growing and Ecosystem Simulator utilizing high-fidelity low-poly procedural structures, moisture simulations, wildlife tracking, and dynamic eco-quests.">
+    <meta property="og:title" content="Forest Growing Simulator Pro — EverGreen 3D">
+    <meta property="og:description" content="Cultivate a living 3D woodland sanctuary with real-time soil moisture, nutrient diffusion, seasonal cycles, and procedural wildlife.">
+    <link rel="stylesheet" href="/index.css">
 </head>
-<body>
+<body class="bg-[#061311] text-slate-100 overflow-hidden antialiased">
     <div id="root"></div>
     <script type="module" src="/index.tsx"></script>
 </body>

@@ -2,81 +2,85 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
-import { AIGoal, EcosystemType, CityStats, Grid, NewsItem } from "../types";
-import { BUILDINGS } from "../constants";
+import { AIGoal, EcosystemType, CityStats, Grid, NewsItem } from '../types';
+import { BUILDINGS } from '../constants';
 
-// Purely local, procedural ecosystem goal generator ensuring rich variations of quests.
+// Procedural ecosystem quest generator with accurate speciesType tracking
 export const generateCityGoal = async (stats: CityStats, grid: Grid): Promise<AIGoal | null> => {
-  // Wait a small bit to simulate standard local calculation and provide pleasant cadence
-  await new Promise(r => setTimeout(r, 600));
-
-  // Analyze the current sanctuary state
-  const counts: Record<EcosystemType, number> = {} as any;
-  let totalMoisture = 0;
-  let totalNutrients = 0;
-  let tileCount = 0;
+  const counts: Record<string, number> = {};
   let highestGrowthStage = 0;
   let maxStageSpecies: EcosystemType = EcosystemType.Pine;
 
-  grid.flat().forEach(tile => {
-    if (tile) {
-      if (tile.type !== EcosystemType.None && tile.type !== EcosystemType.WateringCan && tile.type !== EcosystemType.NutrientMulch) {
+  for (let y = 0; y < grid.length; y++) {
+    const row = grid[y];
+    for (let x = 0; x < row.length; x++) {
+      const tile = row[x];
+      if (
+        tile &&
+        tile.type !== EcosystemType.None &&
+        tile.type !== EcosystemType.DeadTree &&
+        tile.type !== EcosystemType.WateringCan &&
+        tile.type !== EcosystemType.NutrientMulch
+      ) {
         counts[tile.type] = (counts[tile.type] || 0) + 1;
         if (tile.growthStage > highestGrowthStage) {
           highestGrowthStage = tile.growthStage;
           maxStageSpecies = tile.type;
         }
       }
-      totalMoisture += tile.moisture;
-      totalNutrients += tile.nutrients;
-      tileCount++;
     }
-  });
+  }
 
-  const avgMoisture = Math.round(totalMoisture / (tileCount || 1));
-  const avgNutrients = Math.round(totalNutrients / (tileCount || 1));
-
-  // Determine a clever deterministic/procedural goal based on the day or current progress
-  // We alternate targetTypes to keep gameplay fresh
   const goalsPool = [
     {
-      type: 'biomass',
       getEligible: () => true,
-      generate: () => {
+      generate: (): AIGoal => {
         const currentBiomass = stats.population;
-        const targetValue = Math.max(currentBiomass + 250, Math.floor((currentBiomass + 150) / 100) * 100 + 100);
-        const reward = Math.min(250, Math.max(80, Math.round(targetValue * 0.3)));
+        const targetValue = Math.max(
+          currentBiomass + 220,
+          Math.floor((currentBiomass + 150) / 100) * 100 + 100
+        );
+        const reward = Math.min(260, Math.max(85, Math.round(targetValue * 0.28)));
         const descriptions = [
-          "Spotted forest owlets are seeking thicker twig crowns. Increase total Forest Biomass to help shelter nesting families.",
-          "Ancient root webs are glowing. Raise our total Forest Biomass to strengthen the floor mycelium network.",
-          "Fragrant micro-climates are forming. Enhance the Forest Biomass to cultivate rare moss canopies on high trunks."
+          'Spotted forest owlets are seeking thicker twig crowns. Raise total Forest Biomass to shelter nesting families.',
+          'Ancient root webs are strengthening. Increase total Forest Biomass to nourish the forest floor mycelium network.',
+          'Fragrant micro-climates are emerging. Grow your Forest Biomass to cultivate moss canopies across the glade.',
         ];
-        const description = descriptions[stats.day % descriptions.length];
-        return { description, targetType: 'biomass' as const, targetValue, reward, completed: false };
-      }
+        return {
+          description: descriptions[stats.day % descriptions.length],
+          targetType: 'biomass',
+          targetValue,
+          reward,
+          completed: false,
+        };
+      },
     },
     {
-      type: 'energy',
       getEligible: () => stats.day > 1,
-      generate: () => {
+      generate: (): AIGoal => {
         const currentEnergy = stats.money;
-        const targetValue = Math.max(currentEnergy + 120, Math.floor((currentEnergy + 100) / 50) * 50 + 100);
-        const reward = Math.min(150, Math.max(60, Math.round(targetValue * 0.15)));
+        const targetValue = Math.max(
+          currentEnergy + 120,
+          Math.floor((currentEnergy + 100) / 50) * 50 + 100
+        );
+        const reward = Math.min(180, Math.max(65, Math.round(targetValue * 0.16)));
         const descriptions = [
-          "Save up Solar Energy from fully photosynthesizing foliage leaves to construct secondary deep well reservoirs.",
-          "The solar atmosphere is peaking. Amass Solar Energy points to activate geothermal warmth channels in the clay beds.",
-          "Harvest sunlight and accumulate Solar Energy points to satisfy seasonal light-well thresholds."
+          'Store Solar Energy from photosynthesizing canopies to prepare for upcoming seasonal shifts.',
+          'Sunlight is peaking across the valley. Accumulate Solar Energy to sustain future exotic plantings.',
+          'Harvest golden daylight and amass Solar Energy reserves for your woodland sanctuary.',
         ];
-        const description = descriptions[stats.day % descriptions.length];
-        return { description, targetType: 'energy' as const, targetValue, reward, completed: false };
-      }
+        return {
+          description: descriptions[stats.day % descriptions.length],
+          targetType: 'energy',
+          targetValue,
+          reward,
+          completed: false,
+        };
+      },
     },
     {
-      type: 'species_count',
       getEligible: () => true,
-      generate: () => {
-        // Select an appropriate species to request based on day or budget
-        // Let's alternate through beautiful flora
+      generate: (): AIGoal => {
         const eligibleFlora = [
           EcosystemType.Pine,
           EcosystemType.Oak,
@@ -87,107 +91,104 @@ export const generateCityGoal = async (stats: CityStats, grid: Grid): Promise<AI
           EcosystemType.Peepal,
           EcosystemType.Neem,
           EcosystemType.Banyan,
+          EcosystemType.Birch,
+          EcosystemType.Bamboo,
         ];
         const selectedSpecies = eligibleFlora[stats.day % eligibleFlora.length];
-        const speciesName = BUILDINGS[selectedSpecies]?.name || "Specimens";
+        const speciesName = BUILDINGS[selectedSpecies]?.name || 'Specimens';
         const currentCount = counts[selectedSpecies] || 0;
         const targetValue = currentCount + 2;
-        const reward = (BUILDINGS[selectedSpecies]?.cost || 40) * 2 + 30;
+        const reward = (BUILDINGS[selectedSpecies]?.cost || 40) * 2 + 35;
         const descriptions = [
-          `Honeybees are searching for specific pollination structures. Plant and maintain a total of ${targetValue} ${speciesName} specimens.`,
-          `Nesting mountain finches are seeking shelters. Cultivate at least ${targetValue} ${speciesName} trees to invite them.`,
-          `Soil mycelium requires organic minerals. Plant a total of ${targetValue} ${speciesName} trees to enrich this woodland sector.`
+          `Pollinators are seeking fresh blooms. Cultivate a total of ${targetValue} ${speciesName} trees.`,
+          `Migrating mountain finches are scouting new nesting sites. Maintain at least ${targetValue} ${speciesName} specimens.`,
+          `Subterranean mycelium thrives on species diversity. Grow a total of ${targetValue} ${speciesName} trees.`,
         ];
-        const description = descriptions[stats.day % descriptions.length];
         return {
-          description,
-          targetType: 'species_count' as const,
+          description: descriptions[stats.day % descriptions.length],
+          targetType: 'species_count',
           targetValue,
+          speciesType: selectedSpecies,
           buildingType: selectedSpecies,
           reward,
-          completed: false
+          completed: false,
         };
-      }
+      },
     },
     {
-      type: 'growth_stage',
       getEligible: () => highestGrowthStage > 0 && highestGrowthStage < 4,
-      generate: () => {
+      generate: (): AIGoal => {
         const targetStage = Math.min(4, highestGrowthStage + 1);
-        const speciesName = BUILDINGS[maxStageSpecies]?.name || "Foliage";
-        const reward = targetStage === 4 ? 200 : 120;
+        const speciesName = BUILDINGS[maxStageSpecies]?.name || 'Foliage';
+        const reward = targetStage === 4 ? 220 : 125;
+        const stageText =
+          targetStage === 4 ? 'Ancient Titan (Stage 4)' : targetStage === 3 ? 'Mature Tree (Stage 3)' : 'Sapling (Stage 2)';
         const descriptions = [
-          `Promote the maturation of existing plant cells. Nurture a majestic ${speciesName} until it achieves ${targetStage === 4 ? 'Ancient Titan Stage 4' : `Stage ${targetStage} (Sapling/Mature)`} or above.`,
-          `Provide sufficient subterranean hydration and organic nutrient mulch to guide a ${speciesName} to growth stage ${targetStage}.`
+          `Nurture an existing ${speciesName} with moisture and rich loam until it reaches ${stageText}.`,
+          `Guide a ${speciesName} specimen to ${stageText} by keeping its surrounding soil hydrated and fertilized.`,
         ];
-        const description = descriptions[stats.day % descriptions.length];
         return {
-          description,
-          targetType: 'growth_stage' as const,
+          description: descriptions[stats.day % descriptions.length],
+          targetType: 'growth_stage',
           targetValue: targetStage,
+          speciesType: maxStageSpecies,
           buildingType: maxStageSpecies,
           reward,
-          completed: false
+          completed: false,
         };
-      }
-    }
+      },
+    },
   ];
 
-  const eligible = goalsPool.filter(g => g.getEligible());
-  const selectedGoalTemplate = eligible[stats.day % eligible.length] || goalsPool[0];
-  const goal = selectedGoalTemplate.generate();
-
-  return goal as AIGoal;
+  const eligible = goalsPool.filter((g) => g.getEligible());
+  const selected = eligible[stats.day % eligible.length] || goalsPool[0];
+  return selected.generate();
 };
 
-// Purely local, procedural forestry news generator
-export const generateNewsEvent = async (stats: CityStats, recentAction: string | null): Promise<NewsItem | null> => {
-  // Small lag delay to feel authentic
-  await new Promise(r => setTimeout(r, 300));
-
+export const generateNewsEvent = async (
+  stats: CityStats,
+  _recentAction: string | null
+): Promise<NewsItem | null> => {
   const positiveNews = [
-    "Ladybugs relocate to a warm southern cluster to assist with friendly aphid control.",
-    "A cozy family of forest mice has settled beneath a majestic oak root cave.",
-    "Local honeybees report that the air currents carry excellent floral honey perfumes.",
-    "Warm daylight beams stimulate a burst of subterranean mycelium expansion.",
-    "A local woodpecker finds an ideal tree trunk and begins a syncopated morning rhythm.",
-    "Sprout root depths have successfully breached the primary underground water shelf.",
-    "A rare woodland red panda is seen napping peacefully on a sunny branch.",
-    "Garden worms express supreme gratitude for the airy nutrient soil mixtures.",
-    "A flock of migrating songbirds inspects the blossom canopies and nests happily."
+    'Ladybugs gather along warm southern groves, keeping young foliage healthy.',
+    'A family of woodland field mice settles beneath a sheltered oak root hollow.',
+    'Honeybees follow fragrant floral currents drifting across the central glade.',
+    'Warm sunlight stimulates a wave of subterranean mycelium network expansion.',
+    'A woodpecker discovers a sturdy trunk and taps out a steady morning rhythm.',
+    'Deep tree roots reach the primary underground water shelf along the valley.',
+    'A flock of migrating songbirds inspects the blossom canopies and nests above the stream.',
   ];
 
   const negativeNews = [
-    "A dry high-pressure breeze slightly evaporates moisture from exposed clay soils.",
-    "Local forest snails report extreme thirst and solicit water splashes from the gardener.",
-    "Ecosystem surveyors observe light mineral depletion in tightly crowded tree sectors.",
-    "Chilly alpine draft currents temporarily dry out some of the eastern loams.",
-    "Nutrient-hungry wild ferns compete with young tree sprouts for soil peat mulch."
+    'A dry high-pressure breeze evaporates moisture faster from exposed uplands.',
+    'Dry clay ridges near the perimeter could benefit from a fresh watering pass.',
+    'Dense woodland clusters are drawing heavily on local topsoil nutrients.',
+    'Cool alpine gusts temporarily dry out open meadow clearings.',
   ];
 
   const neutralNews = [
-    "Early morning forest damp makes tree needles shimmer like pale green jade crystals.",
-    "Golden maple and red oak leaf showers perform a delicate dance in the autumn drafts.",
-    "Soft fog drifts silently across the isometric ridges, holding ambient soil moisture steady.",
-    "Deep-root subterranean aquifers remain stable and replenish central clay coordinates.",
-    "The woodland sanctuary completes another serene cycle of photosynthesis and quiet growth."
+    'Morning dew catches the sunlight, giving conifer needles a pale jade sheen.',
+    'Autumn breezes carry drifting leaves gently across the winding stream.',
+    'Soft valley mist lingers over the riverbank, steadying ambient soil moisture.',
+    'Subterranean aquifers replenish central riverbanks after another quiet cycle.',
+    'The woodland sanctuary completes another balanced cycle of photosynthesis.',
   ];
 
   let pool = neutralNews;
-  let type: 'positive' | 'negative' | 'neutral' = 'neutral';
+  let type: NewsItem['type'] = 'neutral';
 
   const rand = Math.random();
   if (stats.weather === 'Raining') {
     pool = [
-      "Heavy rainwater saturates the topsoil. Moisture scales show a delightful recovery.",
-      "Young leaf sprouts extend to drink the fresh, cool rainfall droplets.",
-      "Local forest frogs organize an enthusiastic celebratory choir in the moist clover lawns."
+      'Steady rainfall saturates the topsoil, lifting soil moisture across the entire island.',
+      'Young sprouts unfurl fresh leaves to drink in the cool rain.',
+      'Riverbank frogs chorus softly along the swollen stream channel.',
     ];
     type = 'positive';
   } else if (stats.weather === 'Windy') {
     pool = [
-      "Gusty mountain drafts toss maple foliage, causing beautiful golden leaves to flutter.",
-      "Strong wind gusts evaporate ambient topsoil loam moisture slightly faster today."
+      'Brisk valley drafts sweep through the canopy, sending ripples across the treetops.',
+      'Stronger winds accelerate surface evaporation across unwatered loam.',
     ];
     type = 'neutral';
   } else if (rand < 0.45) {
@@ -198,11 +199,9 @@ export const generateNewsEvent = async (stats: CityStats, recentAction: string |
     type = 'negative';
   }
 
-  const text = pool[Math.floor(Math.random() * pool.length)];
-
   return {
-    id: Date.now().toString() + Math.random().toString(),
-    text,
-    type
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    text: pool[Math.floor(Math.random() * pool.length)],
+    type,
   };
 };
