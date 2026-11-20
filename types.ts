@@ -31,7 +31,41 @@ export type WeatherType = 'Sunny' | 'Raining' | 'Windy' | 'Autumn_Dew';
 
 export type SeasonType = 'spring' | 'summer' | 'autumn' | 'winter';
 
+export type SeasonMode = 'auto' | SeasonType;
+
+export interface SeasonWeights {
+  phase: number; // Continuous 0.0 -> 4.0 circular seasonal clock
+  spring: number;
+  summer: number;
+  autumn: number;
+  winter: number;
+  dominant: SeasonType;
+}
+
 export type CameraPreset = 'iso' | 'scenic' | 'top';
+
+export type HumanEra = 0 | 1 | 2 | 3; // 0: Paleolithic, 1: Neolithic, 2: Classical, 3: Eco-Sanctuary
+
+export type EraMode = 'auto' | HumanEra;
+
+export type SettlementKind = 'camp' | 'dwelling' | 'tower' | 'bridge';
+
+export interface SettlementSite {
+  id: string;
+  x: number;
+  y: number;
+  kind: SettlementKind;
+  builtEra: HumanEra;
+}
+
+export interface CivilizationState {
+  enabled: boolean;
+  era: HumanEra;
+  eraMode: EraMode;
+  eraProgress: number; // 0 to 100% progress toward next era
+  humanCount: number;
+  settlements: SettlementSite[];
+}
 
 export interface SpeciesConfig {
   type: EcosystemType;

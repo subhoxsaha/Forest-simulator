@@ -4,26 +4,79 @@
  */
 import * as THREE from 'three';
 
-// --- Shared Module-Scope Geometries (Allocated Once, Reused Across All Instances) ---
+// --- Sculpted High-Craft Shared Geometries (Allocated Once, Reused Across All Instances) ---
+function createBeveledTileGeometry(): THREE.BufferGeometry {
+  const half = 0.455;
+  const radius = 0.055;
+  const shape = new THREE.Shape();
+  shape.moveTo(-half + radius, -half);
+  shape.lineTo(half - radius, -half);
+  shape.quadraticCurveTo(half, -half, half, -half + radius);
+  shape.lineTo(half, half - radius);
+  shape.quadraticCurveTo(half, half, half - radius, half);
+  shape.lineTo(-half + radius, half);
+  shape.quadraticCurveTo(-half, half, -half, half - radius);
+  shape.lineTo(-half, -half + radius);
+  shape.quadraticCurveTo(-half, -half, -half + radius, -half);
+
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: 0.41,
+    bevelEnabled: true,
+    bevelThickness: 0.025,
+    bevelSize: 0.025,
+    bevelSegments: 2,
+    curveSegments: 3,
+  });
+  // Orient extrusion vertically so top sits at +0.225 and bottom at -0.225 (total height ~0.46)
+  geo.rotateX(-Math.PI / 2);
+  geo.center();
+  return geo;
+}
+
+function createOrganicCanopyGeometry(): THREE.BufferGeometry {
+  const geo = new THREE.IcosahedronGeometry(0.5, 2);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const vx = pos.getX(i);
+    const vy = pos.getY(i);
+    const vz = pos.getZ(i);
+    // Subtle multi-lobe organic puffing so canopies look leafy and sculpted up close
+    const puff =
+      1.0 +
+      Math.sin(vx * 7.2 + vy * 5.4) * 0.065 +
+      Math.cos(vz * 6.8 - vy * 4.9) * 0.055;
+    pos.setXYZ(i, vx * puff, vy * puff, vz * puff);
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
 export const sharedGeos = {
   box: new THREE.BoxGeometry(1, 1, 1),
-  tileBox: new THREE.BoxGeometry(0.96, 0.45, 0.96),
-  cylinder: new THREE.CylinderGeometry(0.5, 0.5, 1, 8),
-  taperedTrunk: new THREE.CylinderGeometry(0.36, 0.56, 1, 7),
-  cone: new THREE.ConeGeometry(0.5, 1, 6),
-  sphere: new THREE.IcosahedronGeometry(0.5, 1), // Crisper stylized low-poly canopy silhouette
-  smoothSphere: new THREE.SphereGeometry(0.5, 8, 6),
+  tileBox: createBeveledTileGeometry(),
+  cylinder: new THREE.CylinderGeometry(0.5, 0.5, 1, 10),
+  taperedTrunk: new THREE.CylinderGeometry(0.35, 0.57, 1, 10),
+  cone: new THREE.ConeGeometry(0.5, 1, 9),
+  sphere: createOrganicCanopyGeometry(),
+  smoothSphere: new THREE.SphereGeometry(0.5, 12, 10),
   plane: new THREE.PlaneGeometry(1, 1),
-  ring: new THREE.RingGeometry(0.42, 0.52, 24),
-  rippleRing: new THREE.RingGeometry(0.12, 0.22, 24),
-  blade: new THREE.ConeGeometry(0.38, 1, 4),
-  petal: new THREE.PlaneGeometry(0.055, 0.068),
-  raindrop: new THREE.BoxGeometry(0.016, 0.42, 0.016),
+  riverPlane: new THREE.PlaneGeometry(1, 1, 6, 6),
+  ring: new THREE.RingGeometry(0.42, 0.52, 28),
+  rippleRing: new THREE.RingGeometry(0.12, 0.22, 28),
+  blade: new THREE.ConeGeometry(0.36, 1, 4),
+  wildflower: new THREE.DodecahedronGeometry(0.5, 0),
+  petal: new THREE.PlaneGeometry(0.058, 0.072),
+  raindrop: new THREE.BoxGeometry(0.015, 0.44, 0.015),
   cursorEdges: new THREE.EdgesGeometry(new THREE.BoxGeometry(1.02, 0.06, 1.02)),
 };
 
-// --- Procedural Micro-Grain Bump Texture (100% Zero-404 Code Generated) ---
-function createOrganicNoiseTexture(size = 128): THREE.CanvasTexture {
+// --- Procedural High-Detail PBR Bump Textures (100% Code Generated, Zero External Requests) ---
+function createCanvasBumpTexture(
+  size: number,
+  repeatX: number,
+  repeatY: number,
+  sampleFn: (px: number, py: number, size: number) => number
+): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
@@ -31,36 +84,84 @@ function createOrganicNoiseTexture(size = 128): THREE.CanvasTexture {
   if (ctx) {
     const imgData = ctx.createImageData(size, size);
     const data = imgData.data;
-    for (let i = 0; i < data.length; i += 4) {
-      const px = (i / 4) % size;
-      const py = Math.floor(i / 4 / size);
-      const n =
-        Math.sin(px * 0.35) * Math.cos(py * 0.35) * 20 +
-        (((Math.sin(px * 12.9898 + py * 78.233) * 43758.5453) % 1 + 1) % 1) * 45;
-      const v = Math.max(0, Math.min(255, Math.floor(115 + n)));
-      data[i] = v;
-      data[i + 1] = v;
-      data[i + 2] = v;
-      data[i + 3] = 255;
+    for (let py = 0; py < size; py++) {
+      for (let px = 0; px < size; px++) {
+        const v = Math.max(0, Math.min(255, Math.floor(sampleFn(px, py, size))));
+        const idx = (py * size + px) * 4;
+        data[idx] = v;
+        data[idx + 1] = v;
+        data[idx + 2] = v;
+        data[idx + 3] = 255;
+      }
     }
     ctx.putImageData(imgData, 0, 0);
   }
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(2, 2);
-  // Linear data map (bump/roughness) -> NoColorSpace
+  tex.repeat.set(repeatX, repeatY);
   tex.colorSpace = THREE.NoColorSpace;
   tex.needsUpdate = true;
   return tex;
 }
 
-let cachedNoiseTex: THREE.CanvasTexture | null = null;
+const hash2 = (x: number, y: number) =>
+  (((Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1) + 1) % 1;
+
+let cachedTerrainBump: THREE.CanvasTexture | null = null;
+let cachedBarkBump: THREE.CanvasTexture | null = null;
+let cachedBirchBump: THREE.CanvasTexture | null = null;
+let cachedLeafBump: THREE.CanvasTexture | null = null;
+
 export function getOrganicBumpTexture(): THREE.CanvasTexture {
-  if (!cachedNoiseTex && typeof document !== 'undefined') {
-    cachedNoiseTex = createOrganicNoiseTexture(128);
+  if (!cachedTerrainBump && typeof document !== 'undefined') {
+    cachedTerrainBump = createCanvasBumpTexture(256, 2, 2, (px, py) => {
+      const wave = Math.sin(px * 0.14) * Math.cos(py * 0.14) * 24;
+      const tuft = Math.sin(px * 0.42 + py * 0.25) * 16;
+      const grain = hash2(px, py) * 44;
+      return 112 + wave + tuft + grain;
+    });
   }
-  return cachedNoiseTex!;
+  return cachedTerrainBump!;
+}
+
+export function getBarkBumpTexture(): THREE.CanvasTexture {
+  if (!cachedBarkBump && typeof document !== 'undefined') {
+    cachedBarkBump = createCanvasBumpTexture(256, 2, 3, (px, py) => {
+      // Deep vertical bark furrows + organic wood fibers
+      const furrow = Math.sin(px * 0.34 + Math.sin(py * 0.08) * 1.8) * 42;
+      const ridge = Math.sin(px * 0.92 + py * 0.05) * 22;
+      const speck = hash2(px, Math.floor(py * 0.5)) * 28;
+      return 118 + furrow + ridge + speck;
+    });
+  }
+  return cachedBarkBump!;
+}
+
+export function getBirchBumpTexture(): THREE.CanvasTexture {
+  if (!cachedBirchBump && typeof document !== 'undefined') {
+    cachedBirchBump = createCanvasBumpTexture(256, 1, 2, (px, py) => {
+      // Characteristic horizontal birch bark lenticels
+      const band = Math.sin(py * 0.48 + Math.sin(px * 0.12) * 1.4);
+      const lenticel = band > 0.72 ? -70 : 0;
+      const subtle = Math.sin(py * 0.18) * 14 + hash2(px, py) * 18;
+      return 165 + lenticel + subtle;
+    });
+  }
+  return cachedBirchBump!;
+}
+
+export function getLeafBumpTexture(): THREE.CanvasTexture {
+  if (!cachedLeafBump && typeof document !== 'undefined') {
+    cachedLeafBump = createCanvasBumpTexture(256, 3, 3, (px, py) => {
+      // Overlapping micro leaf-cluster stipple for crisp detail up close in Bird Flight
+      const c1 = Math.sin(px * 0.28 + Math.cos(py * 0.22) * 2.2) * 32;
+      const c2 = Math.cos(py * 0.34 - Math.sin(px * 0.26) * 2.0) * 28;
+      const fine = hash2(Math.floor(px * 0.5), Math.floor(py * 0.5)) * 34;
+      return 122 + c1 + c2 + fine;
+    });
+  }
+  return cachedLeafBump!;
 }
 
 // --- Shared Water Shader Uniforms (Mutated in single useFrame, zero material rebuilds) ---
@@ -72,7 +173,7 @@ export const waterUniforms = {
 
 /**
  * Extends MeshStandardMaterial via onBeforeCompile so the water retains full PBR lighting,
- * environment reflections, shadows, and fog while rippling smoothly on the GPU.
+ * environment reflections, shadows, and fog while rippling smoothly with caustics & Fresnel sheen.
  */
 export function createAnimatedWaterMaterial(options: {
   color: string;
@@ -106,7 +207,8 @@ export function createAnimatedWaterMaterial(options: {
         uniform float uTime;
         uniform float uWaveAmp;
         uniform float uFlowSpeed;
-        varying float vWaterCrest;`
+        varying float vWaterCrest;
+        varying vec3 vWorldPosW;`
       )
       .replace(
         '#include <begin_vertex>',
@@ -115,28 +217,40 @@ export function createAnimatedWaterMaterial(options: {
         #ifdef USE_INSTANCING
           wp = modelMatrix * instanceMatrix * vec4(transformed, 1.0);
         #endif
-        float flowCoord = (wp.x + wp.z) * ${isRiver > 0.5 ? '2.4' : '0.45'} - uTime * uFlowSpeed * ${isRiver > 0.5 ? '3.2' : '1.1'};
-        float crossCoord = (wp.x - wp.z) * ${isRiver > 0.5 ? '3.1' : '0.6'} + uTime * 1.4;
-        float w1 = sin(flowCoord) * 0.65 + cos(crossCoord) * 0.35;
+        float flowCoord = (wp.x + wp.z) * ${isRiver > 0.5 ? '2.8' : '0.42'} - uTime * uFlowSpeed * ${isRiver > 0.5 ? '3.4' : '1.15'};
+        float crossCoord = (wp.x - wp.z) * ${isRiver > 0.5 ? '3.6' : '0.62'} + uTime * 1.65;
+        float fineCoord = (wp.x * 5.2 - wp.z * 4.4) - uTime * 2.4;
+        float w1 = sin(flowCoord) * 0.56 + cos(crossCoord) * 0.30 + sin(fineCoord) * 0.14;
         float disp = w1 * uWaveAmp * ${waveScale.toFixed(2)};
         transformed.z += disp;
-        vWaterCrest = w1;`
+        vWaterCrest = w1;
+        vWorldPosW = wp.xyz;`
       );
 
     shader.fragmentShader = shader.fragmentShader
       .replace(
         '#include <common>',
         `#include <common>
-        varying float vWaterCrest;`
+        uniform float uTime;
+        varying float vWaterCrest;
+        varying vec3 vWorldPosW;`
       )
       .replace(
         '#include <color_fragment>',
         `#include <color_fragment>
-        float shimmer = smoothstep(0.35, 0.95, vWaterCrest) * ${isRiver > 0.5 ? '0.16' : '0.08'};
-        diffuseColor.rgb += vec3(0.55, 0.82, 0.96) * shimmer;`
+        // Sparkling sunlit water caustics + crest foam shimmer
+        float cA = sin(vWorldPosW.x * ${isRiver > 0.5 ? '7.5' : '1.1'} + uTime * 2.2) * cos(vWorldPosW.z * ${isRiver > 0.5 ? '7.0' : '1.1'} - uTime * 1.7);
+        float cB = sin((vWorldPosW.x - vWorldPosW.z) * ${isRiver > 0.5 ? '5.4' : '0.85'} + uTime * 2.9);
+        float caustic = smoothstep(0.42, 0.96, cA * 0.55 + cB * 0.45);
+        float shimmer = smoothstep(0.28, 0.92, vWaterCrest) * ${isRiver > 0.5 ? '0.24' : '0.12'};
+        // Angle-dependent Fresnel sky reflection boost for dramatic grazing Bird Flight views
+        vec3 viewDirW = normalize(cameraPosition - vWorldPosW);
+        float fresnel = pow(1.0 - max(0.0, viewDirW.y), 3.0);
+        diffuseColor.rgb += vec3(0.58, 0.88, 1.0) * (shimmer + caustic * ${isRiver > 0.5 ? '0.20' : '0.09'});
+        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.76, 0.92, 1.0), fresnel * ${isRiver > 0.5 ? '0.32' : '0.42'});`
       );
   };
-  mat.customProgramCacheKey = () => `evergreen-water-${isRiver}-${waveScale}`;
+  mat.customProgramCacheKey = () => `evergreen-water-v2-${isRiver}-${waveScale}`;
   return mat;
 }
 
@@ -144,7 +258,6 @@ export function createAnimatedWaterMaterial(options: {
 const materialPool = new Map<string, THREE.MeshStandardMaterial>();
 
 function quantizeHex(color: THREE.Color): string {
-  // Quantize to 5-bit per channel so similar variations share materials efficiently
   const r = Math.round(color.r * 31);
   const g = Math.round(color.g * 31);
   const b = Math.round(color.b * 31);
@@ -166,37 +279,59 @@ export function getPooledMaterial(
   const cached = materialPool.get(key);
   if (cached) return cached;
 
-  // Deliberate roughness contrast (>= 0.25 difference between bark/foliage/blossom/fungi)
   let roughness = 0.72;
   let metalness = 0.04;
+  let bumpMap: THREE.Texture | null = null;
+  let bumpScale = 0;
+  let flatShading = true;
+
   if (category === 'bark' || category === 'deadWood') {
-    roughness = 0.96;
+    roughness = 0.94;
     metalness = 0.02;
+    bumpMap = getBarkBumpTexture();
+    bumpScale = 0.032;
+    flatShading = false;
   } else if (category === 'birchBark') {
-    roughness = 0.82;
+    roughness = 0.80;
     metalness = 0.04;
+    bumpMap = getBirchBumpTexture();
+    bumpScale = 0.024;
+    flatShading = false;
   } else if (category === 'bambooBark') {
-    roughness = 0.55;
-    metalness = 0.08;
-  } else if (category === 'leaf') {
-    roughness = 0.68;
-    metalness = 0.05;
-  } else if (category === 'blossom') {
     roughness = 0.52;
+    metalness = 0.08;
+    bumpMap = getBirchBumpTexture();
+    bumpScale = 0.014;
+    flatShading = false;
+  } else if (category === 'leaf') {
+    roughness = 0.66;
+    metalness = 0.04;
+    bumpMap = getLeafBumpTexture();
+    bumpScale = 0.026;
+    flatShading = false;
+  } else if (category === 'blossom') {
+    roughness = 0.50;
     metalness = 0.06;
+    bumpMap = getLeafBumpTexture();
+    bumpScale = 0.018;
+    flatShading = false;
   } else if (category === 'fungi') {
-    roughness = 0.32;
-    metalness = 0.1;
+    roughness = 0.34;
+    metalness = 0.08;
+    flatShading = false;
   } else if (category === 'critter') {
-    roughness = 0.78;
-    metalness = 0.05;
+    roughness = 0.76;
+    metalness = 0.04;
+    flatShading = false;
   }
 
   const mat = new THREE.MeshStandardMaterial({
     color: c.clone(),
-    flatShading: true,
+    flatShading,
     roughness,
     metalness,
+    bumpMap,
+    bumpScale,
     opacity,
     transparent,
     ...(emissive ? { emissive: new THREE.Color(emissive), emissiveIntensity } : {}),

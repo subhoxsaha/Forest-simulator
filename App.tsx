@@ -7,23 +7,27 @@ import {
   Grid,
   EcosystemType,
   CityStats,
-  AIGoal,
-  NewsItem,
   CameraPreset,
+  SeasonMode,
+  CivilizationState,
+  EraMode,
 } from './types';
-import { GRID_SIZE, BUILDINGS, INITIAL_MONEY } from './constants';
+import { GRID_SIZE, INITIAL_MONEY } from './constants';
 import IsoMap from './components/IsoMap';
 import UIOverlay from './components/UIOverlay';
-import StartScreen from './components/StartScreen';
-import { generateCityGoal, generateNewsEvent } from './services/geminiService';
 import { ecosystemAudio } from './services/audio';
 import { simClock } from './simulation/clock';
+import { generateNaturalForestGrid, stepEcosystemTick } from './simulation/engine';
 import {
-  createInitialGrid,
-  generateNaturalForestGrid,
-  stepEcosystemTick,
-} from './simulation/engine';
-import { RIVER_MASK } from './utils/webgl';
+  createInitialCivilization,
+  isTileReservedBySettlement,
+  setCivilizationEraOverride,
+  stepCivilizationTick,
+} from './simulation/civilization';
+import { gridToWorld, RIVER_MASK } from './utils/webgl';
+import { wildlifeTracker } from './simulation/wildlifeTracker';
+import { birdFlightState, BirdSpotPreset } from './simulation/birdFlightState';
+import { getBirdSpotCoordinates } from './components/scene/BirdFlight';
 
 function readStorage<T>(key: string, fallback: T): T {
   try {
@@ -34,86 +38,152 @@ function readStorage<T>(key: string, fallback: T): T {
   }
 }
 
-function loadInitialGrid(): Grid {
-  const saved = readStorage<Grid | null>('eg_grid', null);
-  if (
-    Array.isArray(saved) &&
-    saved.length === GRID_SIZE &&
-    Array.isArray(saved[0]) &&
-    saved[0].length === GRID_SIZE
-  ) {
-    return saved;
+function clearSettlementFootprints(grid: Grid, civ: CivilizationState): Grid {
+  const clearedSet = new Set(
+    civ.settlements.filter((s) => s.kind !== 'bridge').map((s) => `${s.x},${s.y}`)
+  );
+  if (clearedSet.size === 0) return grid;
+  return grid.map((row, y) =>
+    row.map((cell, x) =>
+      clearedSet.has(`${x},${y}`) && cell.type !== EcosystemType.None
+        ? { ...cell, type: EcosystemType.None, growthStage: 0, growthProgress: 0 }
+        : cell
+    )
+  );
+}
+
+function createBootState(): {
+  grid: Grid;
+  civilization: CivilizationState;
+  stats: CityStats;
+} {
+  const savedGrid = readStorage<Grid | null>('eg_grid', null);
+  const savedStats = readStorage<CityStats | null>('eg_stats', null);
+  const savedCiv = readStorage<CivilizationState | null>('eg_civilization', null);
+
+  const hasValidGrid =
+    Array.isArray(savedGrid) &&
+    savedGrid.length === GRID_SIZE &&
+    Array.isArray(savedGrid[0]) &&
+    savedGrid[0].length === GRID_SIZE;
+
+  // Ensure the island always boots into a lush living forest rather than a blank empty meadow
+  let treeCount = 0;
+  if (hasValidGrid) {
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        if (savedGrid[y][x].type !== EcosystemType.None) treeCount++;
+      }
+    }
   }
-  // Show a scenic natural forest in the background on first visit behind the Start Screen
-  return generateNaturalForestGrid(42).grid;
+
+  if (hasValidGrid && treeCount >= 12 && savedStats) {
+    const civ =
+      savedCiv && typeof savedCiv.era === 'number' && Array.isArray(savedCiv.settlements)
+        ? { ...savedCiv, enabled: true }
+        : createInitialCivilization(savedGrid, true, 0);
+    return {
+      grid: clearSettlementFootprints(savedGrid, civ),
+      civilization: civ,
+      stats: savedStats,
+    };
+  }
+
+  const generated = generateNaturalForestGrid(Math.random() * 1000);
+  const freshCiv = createInitialCivilization(generated.grid, true, 0);
+  return {
+    grid: clearSettlementFootprints(generated.grid, freshCiv),
+    civilization: freshCiv,
+    stats: {
+      money: INITIAL_MONEY,
+      population: generated.initialBiomass,
+      day: 1,
+      weather: 'Sunny',
+    },
+  };
 }
 
 function App() {
-  // --- Core Simulation State ---
-  const [gameStarted, setGameStarted] = useState<boolean>(() =>
-    readStorage('eg_gameStarted', false)
-  );
-  const [aiEnabled, setAiEnabled] = useState<boolean>(() =>
-    readStorage('eg_aiEnabled', true)
-  );
-  const [wildSeedingEnabled, setWildSeedingEnabled] = useState<boolean>(() =>
-    readStorage('eg_wildSeedingEnabled', true)
-  );
-  const [tickRateMs, setTickRateMs] = useState<number>(() =>
-    readStorage('eg_tickRateMs', 1500)
-  );
-  const [grid, setGrid] = useState<Grid>(loadInitialGrid);
-  const [stats, setStats] = useState<CityStats>(() =>
-    readStorage('eg_stats', {
-      money: INITIAL_MONEY,
-      population: 0,
-      day: 1,
-      weather: 'Sunny',
-    })
-  );
-  const [currentGoal, setCurrentGoal] = useState<AIGoal | null>(() =>
-    readStorage('eg_currentGoal', null)
-  );
-  const [newsFeed, setNewsFeed] = useState<NewsItem[]>(() =>
-    readStorage('eg_newsFeed', [])
-  );
+  const bootRef = useRef<ReturnType<typeof createBootState> | null>(null);
+  if (!bootRef.current) {
+    bootRef.current = createBootState();
+  }
 
-  // --- UI Interaction State ---
+  // --- Fully Autonomous Ecosystem State (starts live immediately) ---
+  const [seasonMode, setSeasonMode] = useState<SeasonMode>(() =>
+    readStorage('eg_seasonMode', 'auto')
+  );
+  const [tickRateMs, setTickRateMs] = useState<number>(() => {
+    const saved = readStorage('eg_tickRateMs', 1500);
+    return saved >= 99999999 ? 1500 : saved;
+  });
+  const [grid, setGrid] = useState<Grid>(() => bootRef.current!.grid);
+  const [civilization, setCivilization] = useState<CivilizationState>(
+    () => bootRef.current!.civilization
+  );
+  const [stats, setStats] = useState<CityStats>(() => bootRef.current!.stats);
+
+  // --- Minimal UI Interaction State ---
+  const [plantingOpen, setPlantingOpen] = useState<boolean>(false);
   const [selectedTool, setSelectedTool] = useState<EcosystemType>(EcosystemType.Pine);
-  const [showFertilityHeatmap, setShowFertilityHeatmap] = useState<boolean>(false);
-  const [hoveredCoords, setHoveredCoords] = useState<{ x: number; y: number } | null>(null);
-  const [isGeneratingGoal, setIsGeneratingGoal] = useState<boolean>(false);
   const [cameraPreset, setCameraPreset] = useState<CameraPreset>('iso');
   const [cameraPresetNonce, setCameraPresetNonce] = useState<number>(0);
   const [zenMode, setZenMode] = useState<boolean>(false);
+  const [wildlifeCamActive, setWildlifeCamActive] = useState<boolean>(false);
+  const [trackedAnimalId, setTrackedAnimalId] = useState<string | null>(null);
+  const [controlMode, setControlMode] = useState<boolean>(false);
+  const [birdMode, setBirdMode] = useState<boolean>(false);
 
-  // Refs for stable simulation loop reads
   const gridRef = useRef(grid);
   const statsRef = useRef(stats);
-  const goalRef = useRef(currentGoal);
-  const aiEnabledRef = useRef(aiEnabled);
-  const wildSeedingRef = useRef(wildSeedingEnabled);
+  const civRef = useRef(civilization);
+  const plantingOpenRef = useRef(plantingOpen);
+  const wildlifeCamActiveRef = useRef(wildlifeCamActive);
+  const trackedAnimalIdRef = useRef(trackedAnimalId);
+  const controlModeRef = useRef(controlMode);
+  const birdModeRef = useRef(birdMode);
   const lastActiveTickRateRef = useRef(tickRateMs < 99999999 ? tickRateMs : 1500);
 
   gridRef.current = grid;
   statsRef.current = stats;
-  goalRef.current = currentGoal;
-  aiEnabledRef.current = aiEnabled;
-  wildSeedingRef.current = wildSeedingEnabled;
+  civRef.current = civilization;
+  plantingOpenRef.current = plantingOpen;
+  wildlifeCamActiveRef.current = wildlifeCamActive;
+  trackedAnimalIdRef.current = trackedAnimalId;
+  controlModeRef.current = controlMode;
+  birdModeRef.current = birdMode;
   if (tickRateMs < 99999999) {
     lastActiveTickRateRef.current = tickRateMs;
   }
 
-  // Sync zero-rerender simulation clock
+  // Start zero-rerender 60fps simulation clock immediately on mount
   useEffect(() => {
-    simClock.setGameStarted(gameStarted);
-  }, [gameStarted]);
+    simClock.setGameStarted(true);
+    simClock.resetDayStart();
+  }, []);
 
   useEffect(() => {
     simClock.setTickRate(tickRateMs);
   }, [tickRateMs]);
 
-  // Lazy initialization of procedural ecosystem audio on first user gesture
+  useEffect(() => {
+    simClock.setSeasonMode(seasonMode);
+  }, [seasonMode]);
+
+  useEffect(() => {
+    simClock.setCurrentDay(stats.day);
+  }, [stats.day]);
+
+  // Sync Wildlife Camera & Direct Control state with zero-rerender tracker singleton
+  useEffect(() => {
+    wildlifeTracker.trackedAnimalId = wildlifeCamActive ? trackedAnimalId : null;
+    wildlifeTracker.controlledAnimalId = wildlifeCamActive && controlMode ? trackedAnimalId : null;
+    if (!wildlifeCamActive || !controlMode) {
+      wildlifeTracker.clearInput();
+    }
+  }, [wildlifeCamActive, trackedAnimalId, controlMode]);
+
+  // Lazy-start procedural ambient audio on first pointer interaction
   useEffect(() => {
     const initAudioOnInteraction = () => {
       ecosystemAudio.init();
@@ -128,106 +198,222 @@ function App() {
     };
   }, []);
 
-  // Update procedural audio ambience based on biomass and weather
   useEffect(() => {
     ecosystemAudio.updateState(stats.population, stats.weather);
   }, [stats.population, stats.weather]);
 
-  // Debounced persistence to localStorage (prevents synchronous JSON.stringify stalls on every click/tick)
+  // Debounced persistence to localStorage
   const persistState = useCallback(() => {
     try {
-      localStorage.setItem('eg_gameStarted', JSON.stringify(gameStarted));
-      localStorage.setItem('eg_aiEnabled', JSON.stringify(aiEnabled));
-      localStorage.setItem('eg_wildSeedingEnabled', JSON.stringify(wildSeedingEnabled));
+      localStorage.setItem('eg_seasonMode', JSON.stringify(seasonMode));
       localStorage.setItem('eg_tickRateMs', JSON.stringify(tickRateMs));
       localStorage.setItem('eg_grid', JSON.stringify(gridRef.current));
       localStorage.setItem('eg_stats', JSON.stringify(statsRef.current));
-      localStorage.setItem('eg_currentGoal', JSON.stringify(goalRef.current));
-      localStorage.setItem('eg_newsFeed', JSON.stringify(newsFeed));
+      localStorage.setItem('eg_civilization', JSON.stringify(civRef.current));
     } catch {
-      // Ignore quota or private mode storage restrictions
+      // Ignore storage quota restrictions
     }
-  }, [gameStarted, aiEnabled, wildSeedingEnabled, tickRateMs, newsFeed]);
+  }, [seasonMode, tickRateMs]);
 
   useEffect(() => {
-    const timer = window.setTimeout(persistState, 1200);
+    const timer = window.setTimeout(persistState, 1500);
     return () => window.clearTimeout(timer);
-  }, [persistState, grid, stats, currentGoal]);
+  }, [persistState, grid, stats, civilization]);
 
   useEffect(() => {
     window.addEventListener('beforeunload', persistState);
     return () => window.removeEventListener('beforeunload', persistState);
   }, [persistState]);
 
-  const addNewsItems = useCallback((items: NewsItem[]) => {
-    if (items.length === 0) return;
-    setNewsFeed((prev) => [...prev, ...items].slice(-20));
-  }, []);
-
-  const addNewsItem = useCallback((text: string, type: NewsItem['type'] = 'neutral') => {
-    setNewsFeed((prev) => [
-      ...prev.slice(-19),
-      { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, text, type },
-    ]);
-  }, []);
-
-  // Fetch a botanical milestone quest
-  const fetchNewGoal = useCallback(async (targetStats?: CityStats, targetGrid?: Grid) => {
-    if (!aiEnabledRef.current) return;
-    setIsGeneratingGoal(true);
-    try {
-      const nextGoal = await generateCityGoal(
-        targetStats || statsRef.current,
-        targetGrid || gridRef.current
-      );
-      if (nextGoal) {
-        setCurrentGoal(nextGoal);
-      }
-    } finally {
-      setIsGeneratingGoal(false);
-    }
-  }, []);
-
-  // Main daily ecosystem simulation loop
+  // Main autonomous daily ecosystem + human civilization loop (always wild-seeding & self-balancing)
   useEffect(() => {
-    if (!gameStarted || tickRateMs >= 99999999) return;
+    if (tickRateMs >= 99999999) return;
 
     const interval = window.setInterval(() => {
-      const result = stepEcosystemTick(
+      const ecoResult = stepEcosystemTick(
         gridRef.current,
         statsRef.current,
-        goalRef.current,
-        aiEnabledRef.current,
-        wildSeedingRef.current
+        null,
+        false,
+        true
       );
 
-      setGrid(result.nextGrid);
-      setStats(result.nextStats);
+      const civResult = stepCivilizationTick(
+        civRef.current,
+        ecoResult.nextGrid,
+        ecoResult.nextStats
+      );
+
+      const finalStats: CityStats = {
+        ...ecoResult.nextStats,
+        money: ecoResult.nextStats.money + civResult.solarBonus,
+      };
+
+      setGrid(civResult.nextGrid);
+      setStats(finalStats);
+      setCivilization(civResult.nextCiv);
+      simClock.setCurrentDay(finalStats.day);
       simClock.resetDayStart();
 
-      if (result.goalCompletedNow) {
-        setCurrentGoal((prev) => (prev ? { ...prev, completed: true } : null));
+      if (civResult.eraAdvanced) {
         ecosystemAudio.playActionChime('reward');
-      }
-
-      if (result.newsEvents.length > 0) {
-        addNewsItems(result.newsEvents);
-      }
-
-      // Occasional poetic ecological commentary
-      if (aiEnabledRef.current && result.nextStats.day % 9 === 0 && Math.random() < 0.65) {
-        generateNewsEvent(result.nextStats, null).then((item) => {
-          if (item) addNewsItems([item]);
-        });
       }
     }, tickRateMs);
 
     return () => window.clearInterval(interval);
-  }, [gameStarted, tickRateMs, addNewsItems]);
+  }, [tickRateMs]);
 
-  // Keyboard shortcuts (Space pause/resume, H Zen Mode, F Fertility Heatmap, 1/2/3 Camera Presets)
+  // Bird Flight Mode handlers
+  const handleToggleBirdMode = useCallback(() => {
+    if (birdModeRef.current) {
+      birdFlightState.active = false;
+      birdFlightState.clearInput();
+      setBirdMode(false);
+      setCameraPresetNonce((n) => n + 1);
+      ecosystemAudio.playActionChime('water');
+      return;
+    }
+
+    setWildlifeCamActive(false);
+    setControlMode(false);
+    setPlantingOpen(false);
+    wildlifeTracker.clearInput();
+    birdFlightState.resetForTakeoff(0, 4.4, 8.2);
+    birdFlightState.active = true;
+    setBirdMode(true);
+    ecosystemAudio.playActionChime('reward');
+  }, []);
+
+  const handleFlyToSpot = useCallback((spot: Exclude<BirdSpotPreset, 'free'>) => {
+    const [x, y, z] = getBirdSpotCoordinates(spot, civRef.current);
+    birdFlightState.setSpotTarget(spot, x, y, z);
+    ecosystemAudio.playActionChime('water');
+  }, []);
+
+  // Wildlife Camera & Direct Control handlers
+  const handleToggleWildlifeCam = useCallback(() => {
+    if (wildlifeCamActiveRef.current) {
+      setWildlifeCamActive(false);
+      setControlMode(false);
+      wildlifeTracker.clearInput();
+      setCameraPresetNonce((n) => n + 1);
+      return;
+    }
+
+    const nearest = wildlifeTracker.findNearestAnimal();
+    if (!nearest) return;
+
+    if (birdModeRef.current) {
+      birdFlightState.active = false;
+      birdFlightState.clearInput();
+      setBirdMode(false);
+    }
+    setPlantingOpen(false);
+    setTrackedAnimalId(nearest.id);
+    setWildlifeCamActive(true);
+    setControlMode(false);
+    ecosystemAudio.playActionChime('water');
+  }, []);
+
+  const handleTrackNearestAnimal = useCallback(() => {
+    const nearest = wildlifeTracker.findNearestAnimal();
+    if (!nearest) return;
+    setTrackedAnimalId(nearest.id);
+    setWildlifeCamActive(true);
+    ecosystemAudio.playActionChime('water');
+  }, []);
+
+  const handleCycleAnimal = useCallback((dir: 1 | -1) => {
+    const next = wildlifeTracker.cycleAnimal(trackedAnimalIdRef.current, dir);
+    if (!next) return;
+    setTrackedAnimalId(next.id);
+    setWildlifeCamActive(true);
+    ecosystemAudio.playActionChime('water');
+  }, []);
+
+  const handleToggleControlMode = useCallback(() => {
+    if (!wildlifeCamActiveRef.current || !trackedAnimalIdRef.current) return;
+    setControlMode((prev) => {
+      const next = !prev;
+      if (!next) {
+        wildlifeTracker.clearInput();
+        ecosystemAudio.playActionChime('water');
+      } else {
+        ecosystemAudio.playActionChime('plant');
+      }
+      return next;
+    });
+  }, []);
+
+  const handleTrackedAnimalLost = useCallback(() => {
+    const fallback = wildlifeTracker.findNearestAnimal();
+    if (fallback) {
+      setTrackedAnimalId(fallback.id);
+    } else {
+      setWildlifeCamActive(false);
+      setControlMode(false);
+      wildlifeTracker.clearInput();
+    }
+  }, []);
+
+  // Keyboard shortcuts + direct Bird Flight & Wildlife Control steering
   useEffect(() => {
-    if (!gameStarted) return;
+    const setWildlifeKey = (code: string, pressed: boolean): boolean => {
+      if (code === 'KeyW' || code === 'ArrowUp') {
+        wildlifeTracker.input.forward = pressed;
+        return true;
+      }
+      if (code === 'KeyS' || code === 'ArrowDown') {
+        wildlifeTracker.input.backward = pressed;
+        return true;
+      }
+      if (code === 'KeyA' || code === 'ArrowLeft') {
+        wildlifeTracker.input.left = pressed;
+        return true;
+      }
+      if (code === 'KeyD' || code === 'ArrowRight') {
+        wildlifeTracker.input.right = pressed;
+        return true;
+      }
+      if (code === 'ShiftLeft' || code === 'ShiftRight') {
+        wildlifeTracker.input.boost = pressed;
+        return true;
+      }
+      return false;
+    };
+
+    const setBirdKey = (code: string, pressed: boolean): boolean => {
+      if (code === 'KeyW' || code === 'ArrowUp') {
+        birdFlightState.input.forward = pressed;
+        return true;
+      }
+      if (code === 'KeyS' || code === 'ArrowDown') {
+        birdFlightState.input.brake = pressed;
+        return true;
+      }
+      if (code === 'KeyA' || code === 'ArrowLeft') {
+        birdFlightState.input.left = pressed;
+        return true;
+      }
+      if (code === 'KeyD' || code === 'ArrowRight') {
+        birdFlightState.input.right = pressed;
+        return true;
+      }
+      if (code === 'Space' || code === 'KeyE') {
+        birdFlightState.input.climb = pressed;
+        return true;
+      }
+      if (code === 'KeyQ' || code === 'ControlLeft') {
+        birdFlightState.input.descend = pressed;
+        return true;
+      }
+      if (code === 'ShiftLeft' || code === 'ShiftRight') {
+        birdFlightState.input.boost = pressed;
+        return true;
+      }
+      return false;
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (
@@ -239,139 +425,135 @@ function App() {
         return;
       }
 
+      if (birdModeRef.current) {
+        if (e.key === 'v' || e.key === 'V') {
+          birdFlightState.firstPerson = !birdFlightState.firstPerson;
+          return;
+        }
+        if (e.key === 'b' || e.key === 'B' || e.key === 'Escape') {
+          handleToggleBirdMode();
+          return;
+        }
+        if (setBirdKey(e.code, true)) {
+          if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+          return;
+        }
+      }
+
+      if (wildlifeCamActiveRef.current && controlModeRef.current) {
+        if (setWildlifeKey(e.code, true)) {
+          if (e.code.startsWith('Arrow')) e.preventDefault();
+          return;
+        }
+      }
+
       if (e.code === 'Space') {
         e.preventDefault();
         setTickRateMs((prev) => (prev >= 99999999 ? lastActiveTickRateRef.current : 99999999));
+      } else if (e.key === 'b' || e.key === 'B') {
+        handleToggleBirdMode();
+      } else if (e.key === 'c' || e.key === 'C') {
+        handleToggleWildlifeCam();
+      } else if (e.key === 'Escape') {
+        if (controlModeRef.current) {
+          setControlMode(false);
+          wildlifeTracker.clearInput();
+        } else if (wildlifeCamActiveRef.current) {
+          setWildlifeCamActive(false);
+          setCameraPresetNonce((n) => n + 1);
+        } else if (plantingOpenRef.current) {
+          setPlantingOpen(false);
+        }
+      } else if (wildlifeCamActiveRef.current && (e.key === '[' || e.key === ',')) {
+        handleCycleAnimal(-1);
+      } else if (wildlifeCamActiveRef.current && (e.key === ']' || e.key === '.')) {
+        handleCycleAnimal(1);
       } else if (e.key === 'h' || e.key === 'H') {
         setZenMode((prev) => !prev);
-      } else if (e.key === 'f' || e.key === 'F') {
-        setShowFertilityHeatmap((prev) => !prev);
-      } else if (e.key === '1') {
-        setCameraPreset('iso');
-        setCameraPresetNonce((n) => n + 1);
-      } else if (e.key === '2') {
-        setCameraPreset('scenic');
-        setCameraPresetNonce((n) => n + 1);
-      } else if (e.key === '3') {
-        setCameraPreset('top');
+      } else if (e.key === '1' || e.key === '2' || e.key === '3') {
+        setWildlifeCamActive(false);
+        setControlMode(false);
+        wildlifeTracker.clearInput();
+        setCameraPreset(e.key === '1' ? 'iso' : e.key === '2' ? 'scenic' : 'top');
         setCameraPresetNonce((n) => n + 1);
       }
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      setWildlifeKey(e.code, false);
+      setBirdKey(e.code, false);
+    };
+
+    const onBlur = () => {
+      wildlifeTracker.clearInput();
+      birdFlightState.clearInput();
     };
 
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [gameStarted]);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+      wildlifeTracker.clearInput();
+      birdFlightState.clearInput();
+    };
+  }, [handleToggleBirdMode, handleToggleWildlifeCam, handleCycleAnimal]);
 
-  // Start simulation handler from StartScreen
-  const handleStart = useCallback(
-    ({
-      aiEnabled: enableAi,
-      startWithNaturalForest,
-      wildSeedingEnabled: enableWildSeeding,
-    }: {
-      aiEnabled: boolean;
-      startWithNaturalForest: boolean;
-      wildSeedingEnabled: boolean;
-    }) => {
-      ecosystemAudio.init();
-      setAiEnabled(enableAi);
-      setWildSeedingEnabled(enableWildSeeding);
-      aiEnabledRef.current = enableAi;
-      wildSeedingRef.current = enableWildSeeding;
-
-      let nextGrid: Grid;
-      let initialBiomass = 0;
-
-      if (startWithNaturalForest) {
-        const generated = generateNaturalForestGrid(Math.random() * 1000);
-        nextGrid = generated.grid;
-        initialBiomass = generated.initialBiomass;
-      } else {
-        nextGrid = createInitialGrid();
-      }
-
-      const initialStats: CityStats = {
-        money: INITIAL_MONEY,
-        population: initialBiomass,
-        day: 1,
-        weather: 'Sunny',
-      };
-
-      setGrid(nextGrid);
-      setStats(initialStats);
-      setCurrentGoal(null);
-      setNewsFeed([
-        {
-          id: `${Date.now()}-welcome`,
-          text: startWithNaturalForest
-            ? 'Welcome to EverGreen 3D. A natural forest sanctuary with deer, foxes, songbirds, and river koi awaits.'
-            : 'Welcome to EverGreen 3D. Plant your first seeds along the fertile river valley and watch wildlife arrive.',
-          type: 'positive',
-        },
-      ]);
-      setGameStarted(true);
-      simClock.resetDayStart();
-      simClock.setGameStarted(true);
-      ecosystemAudio.playActionChime('reward');
-
-      if (enableAi) {
-        fetchNewGoal(initialStats, nextGrid);
-      }
-    },
-    [fetchNewGoal]
-  );
-
-  // One-click Natural Forest generator (usable anytime during simulation)
+  // Generate fresh random natural forest biome
   const handleGenerateNaturalForest = useCallback(() => {
     const { grid: wildGrid, initialBiomass } = generateNaturalForestGrid(Math.random() * 1000);
-    const updatedStats: CityStats = {
-      ...statsRef.current,
-      money: Math.max(statsRef.current.money, INITIAL_MONEY),
-      population: initialBiomass,
+    const nextCiv = createInitialCivilization(wildGrid, true, civRef.current.era);
+    const updatedCiv: CivilizationState = {
+      ...nextCiv,
+      eraMode: civRef.current.eraMode,
+      eraProgress: civRef.current.eraProgress,
     };
 
-    setGrid(wildGrid);
-    setStats(updatedStats);
+    const finalGrid = clearSettlementFootprints(wildGrid, updatedCiv);
+    setGrid(finalGrid);
+    setCivilization(updatedCiv);
+    setStats((prev) => ({
+      ...prev,
+      population: initialBiomass,
+    }));
     ecosystemAudio.playActionChime('reward');
-    addNewsItem(
-      'Natural Biome Generated: Riparian groves, sunlit meadows, upland pines, and wild fauna have settled across the island.',
-      'positive'
-    );
+  }, []);
 
-    if (aiEnabledRef.current) {
-      fetchNewGoal(updatedStats, wildGrid);
-    }
-  }, [addNewsItem, fetchNewGoal]);
+  const handleChangeSeasonMode = useCallback((mode: SeasonMode) => {
+    setSeasonMode(mode);
+    simClock.setSeasonMode(mode);
+    ecosystemAudio.playActionChime('water');
+  }, []);
 
-  // Tile interaction handler
+  const handleChangeEraMode = useCallback((mode: EraMode) => {
+    const updated = setCivilizationEraOverride(civRef.current, gridRef.current, mode);
+    setCivilization(updated);
+    setGrid((prev) => clearSettlementFootprints(prev, updated));
+    ecosystemAudio.playActionChime('reward');
+  }, []);
+
+  // Tile click: focus creature in Wildlife Cam mode, or free plant/clear when Plant palette is open
   const handleTileClick = useCallback(
     (x: number, y: number) => {
-      const currentGrid = gridRef.current;
-      const currentStats = statsRef.current;
-      const tile = currentGrid[y]?.[x];
-      if (!tile) return;
-
-      const isRiver = RIVER_MASK[y]?.[x] ?? false;
-      const toolConfig = BUILDINGS[selectedTool];
-      if (!toolConfig) return;
-
-      if (currentStats.money < toolConfig.cost) {
-        addNewsItem(
-          `Insufficient Solar Energy for ${toolConfig.name} (needs ${toolConfig.cost}).`,
-          'negative'
-        );
+      if (wildlifeCamActiveRef.current) {
+        const [wx, , wz] = gridToWorld(x, y);
+        const nearest = wildlifeTracker.findNearestAnimal(wx, wz);
+        if (nearest) {
+          setTrackedAnimalId(nearest.id);
+          ecosystemAudio.playActionChime('water');
+        }
         return;
       }
 
-      // River guard
-      if (isRiver) {
-        if (
-          selectedTool !== EcosystemType.WateringCan &&
-          selectedTool !== EcosystemType.NutrientMulch &&
-          selectedTool !== EcosystemType.None
-        ) {
-          addNewsItem('Cannot plant terrestrial trees inside the flowing river channel.', 'neutral');
-        }
+      if (!plantingOpenRef.current) return;
+
+      const currentGrid = gridRef.current;
+      const tile = currentGrid[y]?.[x];
+      if (!tile) return;
+
+      if (RIVER_MASK[y]?.[x] || isTileReservedBySettlement(civRef.current, x, y)) {
         return;
       }
 
@@ -380,28 +562,8 @@ function App() {
           ry === y ? row.map((cell, rx) => (rx === x ? updatedTile : cell)) : row
         );
 
-      // 1. Watering Can
-      if (selectedTool === EcosystemType.WateringCan) {
-        const nextMoisture = Math.min(100, tile.moisture + 40);
-        setGrid(cloneGridWithTile({ ...tile, moisture: nextMoisture }));
-        setStats((prev) => ({ ...prev, money: prev.money - toolConfig.cost }));
-        ecosystemAudio.playActionChime('water');
-        return;
-      }
-
-      // 2. Nutrient Mulch
-      if (selectedTool === EcosystemType.NutrientMulch) {
-        const nextNutrients = Math.min(100, tile.nutrients + 45);
-        setGrid(cloneGridWithTile({ ...tile, nutrients: nextNutrients }));
-        setStats((prev) => ({ ...prev, money: prev.money - toolConfig.cost }));
-        ecosystemAudio.playActionChime('mulch');
-        return;
-      }
-
-      // 3. Spade / Prune
       if (selectedTool === EcosystemType.None) {
         if (tile.type === EcosystemType.None) return;
-        const removedName = BUILDINGS[tile.type]?.name || tile.type;
         setGrid(
           cloneGridWithTile({
             ...tile,
@@ -410,20 +572,11 @@ function App() {
             growthProgress: 0,
           })
         );
-        setStats((prev) => ({ ...prev, money: prev.money - toolConfig.cost }));
         ecosystemAudio.playActionChime('prune');
-        addNewsItem(`Cleared ${removedName} at [${x}, ${y}].`, 'neutral');
         return;
       }
 
-      // 4. Plant a tree species
-      if (tile.type !== EcosystemType.None) {
-        addNewsItem(
-          `Tile [${x}, ${y}] is occupied. Use Spade / Prune first to clear space.`,
-          'neutral'
-        );
-        return;
-      }
+      if (tile.type !== EcosystemType.None) return;
 
       setGrid(
         cloneGridWithTile({
@@ -433,69 +586,11 @@ function App() {
           growthProgress: 0,
         })
       );
-      setStats((prev) => ({
-        ...prev,
-        money: prev.money - toolConfig.cost,
-        population: prev.population + 2,
-      }));
+      setStats((prev) => ({ ...prev, population: prev.population + 2 }));
       ecosystemAudio.playActionChime('plant');
     },
-    [selectedTool, addNewsItem]
+    [selectedTool]
   );
-
-  const handleClaimReward = useCallback(() => {
-    const goal = goalRef.current;
-    if (!goal || !goal.completed) return;
-
-    const reward = goal.reward;
-    const nextStats = { ...statsRef.current, money: statsRef.current.money + reward };
-    setStats(nextStats);
-    setCurrentGoal(null);
-    ecosystemAudio.playActionChime('reward');
-    addNewsItem(`Milestone Complete: Claimed +${reward} Solar Energy.`, 'positive');
-    fetchNewGoal(nextStats, gridRef.current);
-  }, [addNewsItem, fetchNewGoal]);
-
-  const handleSelectCameraPreset = useCallback((preset: CameraPreset) => {
-    setCameraPreset(preset);
-    setCameraPresetNonce((n) => n + 1);
-  }, []);
-
-  const handleResetGame = useCallback(() => {
-    const keys = [
-      'eg_gameStarted',
-      'eg_aiEnabled',
-      'eg_wildSeedingEnabled',
-      'eg_tickRateMs',
-      'eg_grid',
-      'eg_stats',
-      'eg_currentGoal',
-      'eg_newsFeed',
-    ];
-    keys.forEach((k) => {
-      try {
-        localStorage.removeItem(k);
-      } catch {
-        // Ignore storage error
-      }
-    });
-
-    const fresh = generateNaturalForestGrid(Math.random() * 1000);
-    setGrid(fresh.grid);
-    setStats({
-      money: INITIAL_MONEY,
-      population: fresh.initialBiomass,
-      day: 1,
-      weather: 'Sunny',
-    });
-    setCurrentGoal(null);
-    setNewsFeed([]);
-    setTickRateMs(1500);
-    setShowFertilityHeatmap(false);
-    setZenMode(false);
-    setGameStarted(false);
-    simClock.resetAll();
-  }, []);
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[#071512]">
@@ -506,47 +601,52 @@ function App() {
         population={stats.population}
         weather={stats.weather}
         day={stats.day}
-        showFertilityHeatmap={showFertilityHeatmap}
-        onTileHover={setHoveredCoords}
+        civilization={civilization}
         cameraPreset={cameraPreset}
         cameraPresetNonce={cameraPresetNonce}
+        wildlifeCamActive={wildlifeCamActive}
+        trackedAnimalId={trackedAnimalId}
+        onTrackedAnimalLost={handleTrackedAnimalLost}
+        plantingActive={plantingOpen}
+        birdMode={birdMode}
       />
 
-      {!gameStarted ? (
-        <StartScreen onStart={handleStart} />
-      ) : (
-        <UIOverlay
-          stats={stats}
-          grid={grid}
-          selectedTool={selectedTool}
-          onSelectTool={setSelectedTool}
-          currentGoal={currentGoal}
-          newsFeed={newsFeed}
-          onClaimReward={handleClaimReward}
-          isGeneratingGoal={isGeneratingGoal}
-          aiEnabled={aiEnabled}
-          onToggleAi={(enabled) => {
-            setAiEnabled(enabled);
-            aiEnabledRef.current = enabled;
-            if (enabled && !goalRef.current) {
-              fetchNewGoal();
+      <UIOverlay
+        stats={stats}
+        selectedTool={selectedTool}
+        onSelectTool={setSelectedTool}
+        plantingOpen={plantingOpen}
+        onTogglePlantingOpen={() => {
+          setPlantingOpen((prev) => {
+            const next = !prev;
+            if (next && wildlifeCamActiveRef.current) {
+              setWildlifeCamActive(false);
+              setControlMode(false);
+              wildlifeTracker.clearInput();
             }
-          }}
-          wildSeedingEnabled={wildSeedingEnabled}
-          onToggleWildSeeding={setWildSeedingEnabled}
-          onGenerateNaturalForest={handleGenerateNaturalForest}
-          tickRateMs={tickRateMs}
-          onChangeTickRate={setTickRateMs}
-          showFertilityHeatmap={showFertilityHeatmap}
-          onToggleFertilityHeatmap={() => setShowFertilityHeatmap((prev) => !prev)}
-          hoveredCoords={hoveredCoords}
-          cameraPreset={cameraPreset}
-          onSelectCameraPreset={handleSelectCameraPreset}
-          onResetGame={handleResetGame}
-          zenMode={zenMode}
-          onToggleZenMode={() => setZenMode((prev) => !prev)}
-        />
-      )}
+            return next;
+          });
+        }}
+        onGenerateNaturalForest={handleGenerateNaturalForest}
+        seasonMode={seasonMode}
+        onChangeSeasonMode={handleChangeSeasonMode}
+        civilization={civilization}
+        onChangeEraMode={handleChangeEraMode}
+        tickRateMs={tickRateMs}
+        onChangeTickRate={setTickRateMs}
+        zenMode={zenMode}
+        onToggleZenMode={() => setZenMode((prev) => !prev)}
+        wildlifeCamActive={wildlifeCamActive}
+        trackedAnimalId={trackedAnimalId}
+        controlMode={controlMode}
+        onToggleWildlifeCam={handleToggleWildlifeCam}
+        onCycleAnimal={handleCycleAnimal}
+        onTrackNearestAnimal={handleTrackNearestAnimal}
+        onToggleControlMode={handleToggleControlMode}
+        birdMode={birdMode}
+        onToggleBirdMode={handleToggleBirdMode}
+        onFlyToSpot={handleFlyToSpot}
+      />
     </div>
   );
 }

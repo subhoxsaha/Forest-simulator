@@ -24,6 +24,9 @@ import {
   _color,
 } from './MaterialLibrary';
 import { ecosystemAudio } from '../../services/audio';
+import { simClock } from '../../simulation/clock';
+
+const _winterRiverTint = new THREE.Color('#7dd3fc');
 
 const TILE_COUNT = GRID_SIZE * GRID_SIZE;
 const TILE_THICKNESS = 0.45;
@@ -59,8 +62,9 @@ for (let y = 0; y < GRID_SIZE; y++) {
 
 const RIVER_COUNT = RIVER_TILES.length;
 const TOTAL_FLOATERS = RIVER_COUNT * FLOATERS_PER_RIVER_TILE;
-const MAX_BLADES = LAND_TILES.length * 3; // Up to 3 blades/flowers per land tile
+const MAX_BLADES = LAND_TILES.length * 4; // Up to 4 grass/reed blades per land tile
 const MAX_MOSS = LAND_TILES.length; // 1 moss pebble per land tile
+const MAX_FLOWERS = LAND_TILES.length * 2; // Up to 2 seasonal wildflowers per open meadow tile
 
 interface FloaterSpec {
   wx: number;
@@ -158,6 +162,7 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
     const puddleMeshRef = useRef<THREE.InstancedMesh>(null);
     const bladeMeshRef = useRef<THREE.InstancedMesh>(null);
     const mossMeshRef = useRef<THREE.InstancedMesh>(null);
+    const flowerMeshRef = useRef<THREE.InstancedMesh>(null);
     const riverBedMeshRef = useRef<THREE.InstancedMesh>(null);
     const riverWaterMeshRef = useRef<THREE.InstancedMesh>(null);
     const riverRockMeshRef = useRef<THREE.InstancedMesh>(null);
@@ -174,24 +179,26 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
       const bumpMap = getOrganicBumpTexture();
       const terrainMat = new THREE.MeshStandardMaterial({
         color: '#ffffff',
-        flatShading: true,
-        roughness: 0.92,
+        flatShading: false,
+        roughness: 0.9,
         metalness: 0.02,
         bumpMap,
-        bumpScale: 0.012,
+        bumpScale: 0.022,
       });
       const humusMat = new THREE.MeshStandardMaterial({
         color: '#3f2209',
-        roughness: 0.96,
+        roughness: 0.95,
         metalness: 0.0,
+        bumpMap,
+        bumpScale: 0.018,
         polygonOffset: true,
         polygonOffsetFactor: -1,
         polygonOffsetUnits: -1,
       });
       const puddleMat = new THREE.MeshStandardMaterial({
         color: '#38bdf8',
-        roughness: 0.08,
-        metalness: 0.82,
+        roughness: 0.07,
+        metalness: 0.85,
         transparent: true,
         opacity: 0.78,
         polygonOffset: true,
@@ -200,20 +207,28 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
       });
       const coverMat = new THREE.MeshStandardMaterial({
         color: '#ffffff',
-        flatShading: true,
-        roughness: 0.85,
+        flatShading: false,
+        roughness: 0.82,
         metalness: 0.02,
+      });
+      const flowerMat = new THREE.MeshStandardMaterial({
+        color: '#ffffff',
+        roughness: 0.55,
+        metalness: 0.04,
+        transparent: true,
+        opacity: 1,
       });
       const riverBedMat = new THREE.MeshStandardMaterial({
         color: '#091f38',
         roughness: 0.95,
-        flatShading: true,
+        bumpMap,
+        bumpScale: 0.025,
       });
       const riverWaterMat = createAnimatedWaterMaterial({
         color: '#0284c7',
-        opacity: 0.82,
-        roughness: 0.08,
-        metalness: 0.78,
+        opacity: 0.84,
+        roughness: 0.06,
+        metalness: 0.8,
         waveScale: 1.0,
         isRiver: true,
       });
@@ -221,7 +236,8 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
         color: '#64748b',
         roughness: 0.72,
         metalness: 0.08,
-        flatShading: true,
+        bumpMap,
+        bumpScale: 0.024,
       });
       const floaterMat = new THREE.MeshStandardMaterial({
         color: '#ffffff',
@@ -236,6 +252,7 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
         humusMat,
         puddleMat,
         coverMat,
+        flowerMat,
         riverBedMat,
         riverWaterMat,
         riverRockMat,
@@ -353,6 +370,7 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
       let puddleIdx = 0;
       let bladeIdx = 0;
       let mossIdx = 0;
+      let flowerIdx = 0;
 
       for (let y = 0; y < GRID_SIZE; y++) {
         const row = grid[y];
@@ -388,7 +406,6 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
           }
 
           if (!isRiver) {
-            // Fertile humus patch
             if (tile.nutrients > 65 && humusMeshRef.current) {
               _dummy.position.set(wx, topY + 0.008, wz);
               _dummy.rotation.set(-Math.PI / 2, 0, 0);
@@ -397,7 +414,6 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
               humusMeshRef.current.setMatrixAt(humusIdx++, _dummy.matrix);
             }
 
-            // Saturated water puddle
             if (tile.moisture >= 85 && puddleMeshRef.current) {
               _dummy.position.set(wx + 0.2, topY + 0.012, wz - 0.2);
               _dummy.rotation.set(-Math.PI / 2, 0, 0);
@@ -406,44 +422,60 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
               puddleMeshRef.current.setMatrixAt(puddleIdx++, _dummy.matrix);
             }
 
-            // Micro ground cover (blades, sprouts, moss pebbles)
-            const coverCount = tile.moisture <= 15 ? 0 : isDrySeason || tile.moisture <= 35 ? 1 : 3;
+            // Lush grass tufts, shoreline reeds & moss pebbles
+            const coverCount = tile.moisture <= 15 ? 1 : 4;
             for (let i = 0; i < coverCount; i++) {
               const gHash = getHash(x + i * 36, y - i * 14);
-              const ox = (gHash - 0.5) * 0.62;
-              const oz = (((gHash * 11.7) % 1) - 0.5) * 0.62;
-              const hScale = 0.06 + ((gHash * 7) % 1) * 0.06;
-              const tScale = 0.03 + ((gHash * 3) % 1) * 0.02;
+              const ox = (gHash - 0.5) * 0.68;
+              const oz = (((gHash * 11.7) % 1) - 0.5) * 0.68;
+              const hScale = 0.075 + ((gHash * 7) % 1) * 0.075;
+              const tScale = 0.032 + ((gHash * 3) % 1) * 0.022;
 
-              if (isDrySeason || tile.moisture <= 35) {
-                _color.set(i === 1 ? '#d97706' : '#b45309');
-              } else if (isAutumnActive) {
-                _color.set(i === 0 ? '#ea580c' : i === 1 ? '#eab308' : '#ca8a04');
-              } else if (isWinterActive) {
-                _color.set(i === 0 ? '#e2e8f0' : '#475569');
-              } else if (tile.moisture >= 65) {
-                _color.set(i === 0 ? '#fb7185' : i === 1 ? '#34d399' : '#059669');
+              if (tile.moisture >= 68) {
+                _color.set(i % 2 === 0 ? '#34d399' : '#059669');
               } else {
-                _color.set(i === 0 ? '#10b981' : '#15803d');
+                _color.set(i % 2 === 0 ? '#22c55e' : '#15803d');
               }
 
-              if (i < 2 && bladeMeshRef.current) {
-                const height = i === 1 ? hScale * 1.55 : hScale;
+              if (i < 3 && bladeMeshRef.current && bladeIdx < MAX_BLADES) {
+                const height = i === 1 ? hScale * 1.5 : hScale;
                 _dummy.position.set(wx + ox, topY + height * 0.5, wz + oz);
-                _dummy.rotation.set(0.06, gHash * Math.PI * 2, i === 0 ? -0.18 : 0.06);
+                _dummy.rotation.set(0.08, gHash * Math.PI * 2, i === 0 ? -0.18 : 0.1);
                 _dummy.scale.set(tScale, height, tScale);
                 _dummy.updateMatrix();
                 bladeMeshRef.current.setMatrixAt(bladeIdx, _dummy.matrix);
                 bladeMeshRef.current.setColorAt(bladeIdx, _color);
                 bladeIdx++;
-              } else if (i === 2 && mossMeshRef.current) {
-                _dummy.position.set(wx + ox, topY + tScale * 0.3, wz + oz);
+              } else if (i === 3 && mossMeshRef.current && mossIdx < MAX_MOSS) {
+                _dummy.position.set(wx + ox, topY + tScale * 0.28, wz + oz);
                 _dummy.rotation.set(0, gHash * Math.PI, 0);
-                _dummy.scale.set(tScale * 1.5, tScale * 0.8, tScale * 1.2);
+                _dummy.scale.set(tScale * 1.65, tScale * 0.85, tScale * 1.35);
                 _dummy.updateMatrix();
                 mossMeshRef.current.setMatrixAt(mossIdx, _dummy.matrix);
-                mossMeshRef.current.setColorAt(mossIdx, _color);
+                mossMeshRef.current.setColorAt(mossIdx, _color.set(gHash > 0.5 ? '#64748b' : '#4d7c0f'));
                 mossIdx++;
+              }
+            }
+
+            // Meadow wildflower blooms (daisies, buttercups, lavender, pink clover)
+            if (flowerMeshRef.current && tile.moisture >= 35) {
+              const fCount = tile.type === 'None' ? 2 : 1;
+              for (let f = 0; f < fCount && flowerIdx < MAX_FLOWERS; f++) {
+                const fh = getHash(x * 7.3 + f * 19, y * 13.1 - f * 11);
+                if (fh < 0.28) continue;
+                const fx = (fh - 0.5) * 0.66;
+                const fz = (((fh * 17.3) % 1) - 0.5) * 0.66;
+                const fs = 0.036 + ((fh * 5.3) % 1) * 0.022;
+                const fCol =
+                  fh > 0.82 ? '#f472b6' : fh > 0.64 ? '#fde047' : fh > 0.46 ? '#c084fc' : '#f8fafc';
+
+                _dummy.position.set(wx + fx, topY + 0.055 + fs * 0.4, wz + fz);
+                _dummy.rotation.set(fh, fh * 3.1, 0);
+                _dummy.scale.set(fs, fs * 0.72, fs);
+                _dummy.updateMatrix();
+                flowerMeshRef.current.setMatrixAt(flowerIdx, _dummy.matrix);
+                flowerMeshRef.current.setColorAt(flowerIdx, _color.set(fCol));
+                flowerIdx++;
               }
             }
           }
@@ -474,21 +506,131 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
         mossMeshRef.current.instanceMatrix.needsUpdate = true;
         if (mossMeshRef.current.instanceColor) mossMeshRef.current.instanceColor.needsUpdate = true;
       }
+      if (flowerMeshRef.current) {
+        flowerMeshRef.current.count = flowerIdx;
+        flowerMeshRef.current.instanceMatrix.needsUpdate = true;
+        if (flowerMeshRef.current.instanceColor) flowerMeshRef.current.instanceColor.needsUpdate = true;
+      }
     }, [grid, day, weather, showFertilityHeatmap]);
 
-    // Single zero-GC frame loop for: water shader uniforms, smooth tile color damping, and all 160 river floaters
+    // Single zero-GC frame loop for: water shader uniforms, continuous 4-season terrain blending, grass winter fade, and 160 river floaters
+    const lastSeasonPhaseRef = useRef<number>(-99);
+    const seasonalTileBaseRef = useRef<Float32Array>(new Float32Array(TILE_COUNT * 3));
+    const seasonalBaseInitializedRef = useRef(false);
+
+    // Keep clean un-wintered base colors synced whenever grid/heatmap updates
+    useEffect(() => {
+      const baseArr = seasonalTileBaseRef.current;
+      for (let y = 0; y < GRID_SIZE; y++) {
+        for (let x = 0; x < GRID_SIZE; x++) {
+          const tile = grid[y][x];
+          const idx = (y * GRID_SIZE + x) * 3;
+          const isRiver = RIVER_MASK[y][x];
+          computeTileColor(isRiver, tile.moisture, tile.nutrients, false, false, false, showFertilityHeatmap, _color);
+          baseArr[idx] = _color.r;
+          baseArr[idx + 1] = _color.g;
+          baseArr[idx + 2] = _color.b;
+        }
+      }
+      seasonalBaseInitializedRef.current = true;
+      colorsDirtyRef.current = true;
+    }, [grid, showFertilityHeatmap]);
+
     useFrame((state, delta) => {
       const dt = Math.min(delta, 0.05);
       const t = state.clock.getElapsedTime();
+      const sw = simClock.getSeasonWeights();
 
-      // 1. Update shared GLSL water shader uniforms
+      // 1. Update shared GLSL water shader uniforms + winter icy sheen
       waterUniforms.uTime.value = t;
-      const targetWaveAmp = weather === 'Windy' ? 0.022 : weather === 'Raining' ? 0.015 : 0.01;
-      const targetFlow = weather === 'Windy' ? 0.85 : weather === 'Raining' ? 0.65 : 0.45;
+      const winterSlow = 1 - sw.winter * 0.42;
+      const targetWaveAmp = (weather === 'Windy' ? 0.022 : weather === 'Raining' ? 0.015 : 0.01) * winterSlow;
+      const targetFlow = (weather === 'Windy' ? 0.85 : weather === 'Raining' ? 0.65 : 0.45) * winterSlow;
       waterUniforms.uWaveAmp.value = THREE.MathUtils.damp(waterUniforms.uWaveAmp.value, targetWaveAmp, 3, dt);
       waterUniforms.uFlowSpeed.value = THREE.MathUtils.damp(waterUniforms.uFlowSpeed.value, targetFlow, 3, dt);
 
-      // 2. Smoothly damp tile colors toward targetColors (eliminates sudden color pops!)
+      // Blend river tint subtly toward crisp glacier blue-white in winter
+      const baseRiverHex =
+        weather === 'Sunny'
+          ? '#0284c7'
+          : weather === 'Raining'
+          ? '#0369a1'
+          : weather === 'Autumn_Dew'
+          ? '#0e5a7a'
+          : '#075985';
+      _color.set(baseRiverHex);
+      if (sw.winter > 0.05) {
+        _color.lerp(_winterRiverTint, sw.winter * 0.52);
+      }
+      materials.riverWaterMat.color.lerp(_color, 1 - Math.exp(-3.5 * dt));
+
+      // 2. Recompute continuous 4-season target tile colors whenever seasonPhase shifts smoothly
+      const phaseChanged = Math.abs(sw.phase - lastSeasonPhaseRef.current) > 0.002;
+      if ((phaseChanged || colorsDirtyRef.current) && seasonalBaseInitializedRef.current) {
+        lastSeasonPhaseRef.current = sw.phase;
+        const baseArr = seasonalTileBaseRef.current;
+        const targets = targetColorsRef.current;
+
+        if (!showFertilityHeatmap) {
+          for (let i = 0; i < TILE_COUNT; i++) {
+            const x = i % GRID_SIZE;
+            const y = Math.floor(i / GRID_SIZE);
+            const b = i * 3;
+            const br = baseArr[b];
+            const bg = baseArr[b + 1];
+            const bb = baseArr[b + 2];
+
+            if (RIVER_MASK[y][x]) {
+              targets[b] = br * (1 - sw.winter * 0.2) + 0.45 * sw.winter * 0.2;
+              targets[b + 1] = bg * (1 - sw.winter * 0.2) + 0.58 * sw.winter * 0.2;
+              targets[b + 2] = bb * (1 - sw.winter * 0.2) + 0.72 * sw.winter * 0.2;
+            } else {
+              // Spring: fresh vibrant green | Summer: warm sunlit rich green | Autumn: golden ochre | Winter: frosted snow blanket
+              const spR = Math.min(1, br * 1.06 + 0.02);
+              const spG = Math.min(1, bg * 1.1 + 0.04);
+              const spB = Math.min(1, bb * 0.96);
+
+              const suR = Math.min(1, br * 1.02);
+              const suG = Math.min(1, bg * 1.04);
+              const suB = Math.min(1, bb * 0.88);
+
+              const auR = Math.min(1, br * 1.38 + 0.16);
+              const auG = Math.min(1, bg * 0.96 + 0.06);
+              const auB = Math.max(0, bb * 0.62);
+
+              // Subtle per-tile snow variation so winter ground looks organic, never flat white
+              const frostVar = 0.78 + getHash(x, y) * 0.16;
+              const wiR = br * 0.22 + frostVar * 0.76;
+              const wiG = bg * 0.24 + (frostVar + 0.03) * 0.76;
+              const wiB = bb * 0.2 + (frostVar + 0.06) * 0.78;
+
+              targets[b] = spR * sw.spring + suR * sw.summer + auR * sw.autumn + wiR * sw.winter;
+              targets[b + 1] = spG * sw.spring + suG * sw.summer + auG * sw.autumn + wiG * sw.winter;
+              targets[b + 2] = spB * sw.spring + suB * sw.summer + auB * sw.autumn + wiB * sw.winter;
+            }
+          }
+          colorsDirtyRef.current = true;
+        }
+      }
+
+      // Gently tuck grass blades & wildflowers under snow in winter & tint seasonally
+      if (bladeMeshRef.current) {
+        const winterHide = Math.max(0.08, 1 - sw.winter * 0.9);
+        bladeMeshRef.current.scale.y = THREE.MathUtils.damp(bladeMeshRef.current.scale.y, winterHide, 4, dt);
+        materials.coverMat.color.setRGB(
+          0.92 * sw.spring + 0.95 * sw.summer + 1.15 * sw.autumn + 0.92 * sw.winter,
+          1.08 * sw.spring + 1.0 * sw.summer + 0.86 * sw.autumn + 0.96 * sw.winter,
+          0.9 * sw.spring + 0.86 * sw.summer + 0.65 * sw.autumn + 1.04 * sw.winter
+        );
+      }
+      if (flowerMeshRef.current) {
+        // Wildflowers bloom lushly in Spring & Summer, fade gracefully in Autumn/Winter
+        const bloomOpacity = Math.min(1, sw.spring * 1.15 + sw.summer * 0.95 + sw.autumn * 0.28);
+        materials.flowerMat.opacity = THREE.MathUtils.damp(materials.flowerMat.opacity, bloomOpacity, 3.5, dt);
+        flowerMeshRef.current.visible = materials.flowerMat.opacity > 0.04;
+      }
+
+      // 3. Smoothly damp tile colors toward targetColors (zero sudden color pops!)
       if (colorsDirtyRef.current && tileMeshRef.current) {
         const currents = currentColorsRef.current;
         const targets = targetColorsRef.current;
@@ -512,16 +654,16 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
         if (tileMeshRef.current.instanceColor) {
           tileMeshRef.current.instanceColor.needsUpdate = true;
         }
-        if (maxDiff < 0.002) {
+        if (maxDiff < 0.0015 && !phaseChanged) {
           colorsDirtyRef.current = false;
         }
       }
 
-      // 3. Animate all river foam & autumn leaf floaters in 1 single InstancedMesh pass
+      // 4. Animate all river foam & autumn leaf floaters in 1 single InstancedMesh pass
       if (floaterMeshRef.current) {
-        const flowSpeed = weather === 'Windy' ? 0.58 : weather === 'Raining' ? 0.42 : 0.28;
+        const flowSpeed = (weather === 'Windy' ? 0.58 : weather === 'Raining' ? 0.42 : 0.28) * winterSlow;
         const waveSpeed = weather === 'Windy' ? 3.2 : weather === 'Raining' ? 1.8 : 1.4;
-        const waveHeight = weather === 'Windy' ? 0.016 : weather === 'Raining' ? 0.011 : 0.007;
+        const waveHeight = (weather === 'Windy' ? 0.016 : weather === 'Raining' ? 0.011 : 0.007) * winterSlow;
 
         for (let i = 0; i < TOTAL_FLOATERS; i++) {
           const f = FLOATER_SPECS[i];
@@ -547,7 +689,7 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
         floaterMeshRef.current.instanceMatrix.needsUpdate = true;
       }
 
-      // 4. Occasional organic river bubble audio pop
+      // 5. Occasional organic river bubble audio pop
       if (Math.random() < 0.004) {
         ecosystemAudio.synthesizeWaterBubble();
       }
@@ -670,6 +812,13 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
           raycast={() => null}
         />
 
+        {/* 5b. Seasonal Meadow Wildflowers in 1 Draw Call */}
+        <instancedMesh
+          ref={flowerMeshRef}
+          args={[sharedGeos.wildflower, materials.flowerMat, MAX_FLOWERS]}
+          raycast={() => null}
+        />
+
         {/* 6. Riverbeds in 1 Draw Call */}
         <instancedMesh
           ref={riverBedMeshRef}
@@ -678,10 +827,10 @@ export const InstancedTerrain: React.FC<InstancedTerrainProps> = React.memo(
           raycast={() => null}
         />
 
-        {/* 7. Custom GLSL Flowing River Water Surface in 1 Draw Call */}
+        {/* 7. Subdivided Custom GLSL Flowing River Water Surface with Caustics in 1 Draw Call */}
         <instancedMesh
           ref={riverWaterMeshRef}
-          args={[sharedGeos.plane, materials.riverWaterMat, RIVER_COUNT]}
+          args={[sharedGeos.riverPlane, materials.riverWaterMat, RIVER_COUNT]}
           receiveShadow
           raycast={() => null}
         />

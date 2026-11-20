@@ -299,23 +299,21 @@ export function stepEcosystemTick(
         }
       }
 
-      // A. Moisture dynamics
+      // A. Self-balancing natural moisture dynamics (river seepage, canopy shade, morning dew & rain)
       if (isRiver) {
         tileMoisture = 100;
       } else if (isNearRiver) {
-        tileMoisture = newWeather === 'Raining' ? Math.min(100, tileMoisture + 25) : Math.max(75, tileMoisture);
+        tileMoisture = newWeather === 'Raining' ? Math.min(100, tileMoisture + 20) : Math.max(78, tileMoisture);
       } else if (newWeather === 'Raining') {
-        tileMoisture = Math.min(100, tileMoisture + 20);
+        tileMoisture = Math.min(100, tileMoisture + 18);
       } else {
-        const drying = newWeather === 'Sunny' ? 12 : newWeather === 'Windy' ? 6 : 4;
-        if (tileType === EcosystemType.None) {
-          if (tileMoisture < 40) {
-            tileMoisture = Math.min(40, tileMoisture + Math.max(1, 4 - drying));
-          } else {
-            tileMoisture = Math.max(10, tileMoisture - drying);
-          }
+        const canopyShade = tileType !== EcosystemType.None && tileStage >= 2 ? 0.55 : 1.0;
+        const drying = (newWeather === 'Sunny' ? 3.5 : newWeather === 'Windy' ? 2.5 : 1.0) * canopyShade;
+        if (tileMoisture < 38) {
+          // Natural overnight dew & groundwater capillary recharge prevent barren desertification
+          tileMoisture = Math.min(44, tileMoisture + 3.2);
         } else {
-          tileMoisture = Math.max(5, tileMoisture - drying);
+          tileMoisture = Math.max(28, tileMoisture - drying);
         }
       }
 
@@ -325,19 +323,19 @@ export function stepEcosystemTick(
         tileType !== EcosystemType.Cypress &&
         tileType !== EcosystemType.Banyan
       ) {
-        tileMoisture = Math.min(100, tileMoisture + neighborCypressCount * 5 + neighborBanyanCount * 8);
+        tileMoisture = Math.min(100, tileMoisture + neighborCypressCount * 4 + neighborBanyanCount * 6);
       }
 
       if (validNeighbors > 0) {
         const avgNeighborMoisture = neighborMoistureSum / validNeighbors;
-        tileMoisture = Math.max(0, Math.min(100, tileMoisture + (avgNeighborMoisture - tileMoisture) * 0.18));
+        tileMoisture = Math.max(20, Math.min(100, tileMoisture + (avgNeighborMoisture - tileMoisture) * 0.16));
       }
 
-      // B. Nutrient dynamics
+      // B. Self-balancing nutrient & leaf-litter humus dynamics
       if (tileType === EcosystemType.None) {
-        tileNutrients = Math.min(100, tileNutrients + 1);
+        tileNutrients = Math.min(100, tileNutrients + 2);
       } else if (tileType === EcosystemType.DeadTree) {
-        tileNutrients = Math.min(100, tileNutrients + 5);
+        tileNutrients = Math.min(100, tileNutrients + 6);
       } else if (tileType === EcosystemType.Alder) {
         tileNutrients = Math.min(100, tileNutrients + (tileStage === 1 ? 1 : tileStage === 2 ? 2 : 3));
       } else if (tileType === EcosystemType.Acacia) {
@@ -345,9 +343,9 @@ export function stepEcosystemTick(
       } else if (tileType === EcosystemType.Neem) {
         tileNutrients = Math.min(100, tileNutrients + (tileStage === 1 ? 1 : tileStage === 2 ? 2 : 4));
       } else {
-        let intake = tileStage === 1 ? 1 : tileStage === 2 ? 2 : tileStage === 3 ? 3 : 4;
-        if (tileType === EcosystemType.Bonsai) intake = Math.round(intake * 2.5);
-        tileNutrients = Math.max(5, tileNutrients - intake);
+        // Gentle leaf-litter humus loop keeps woodland loam healthy automatically
+        const netDrift = newWeather === 'Autumn_Dew' ? 2.5 : tileNutrients < 48 ? 1.5 : -0.6;
+        tileNutrients = Math.max(32, Math.min(100, tileNutrients + netDrift));
       }
 
       if (neighborDecomposing && tileType !== EcosystemType.DeadTree) {
@@ -357,10 +355,10 @@ export function stepEcosystemTick(
         tileNutrients = Math.min(100, tileNutrients + neighborAlderCount * 2);
       }
       if (neighborAcaciaCount > 0 && tileType !== EcosystemType.DeadTree && tileType !== EcosystemType.Acacia) {
-        tileNutrients = Math.min(100, tileNutrients + neighborAcaciaCount * 4);
+        tileNutrients = Math.min(100, tileNutrients + neighborAcaciaCount * 3);
       }
       if (neighborNeemCount > 0 && tileType !== EcosystemType.DeadTree && tileType !== EcosystemType.Neem) {
-        tileNutrients = Math.min(100, tileNutrients + neighborNeemCount * 3);
+        tileNutrients = Math.min(100, tileNutrients + neighborNeemCount * 2);
       }
 
       // C1. Decomposition of DeadTree
@@ -386,19 +384,19 @@ export function stepEcosystemTick(
         const config = BUILDINGS[tileType];
         if (config) {
           let moistureMult = 1.0;
-          if (tileMoisture >= 60) moistureMult = 1.5;
-          else if (tileMoisture <= 20) {
-            moistureMult = tileType === EcosystemType.Baobab ? 0.6 : 0.15;
+          if (tileMoisture >= 58) moistureMult = 1.4;
+          else if (tileMoisture <= 24) {
+            moistureMult = tileType === EcosystemType.Baobab ? 0.7 : 0.35;
           }
 
           let nutrientMult = 1.0;
           if (tileType === EcosystemType.Bonsai) {
-            nutrientMult = tileNutrients >= 75 ? 1.4 : tileNutrients <= 45 ? 0.05 : 0.4;
+            nutrientMult = tileNutrients >= 70 ? 1.35 : 0.7;
           } else if (tileType === EcosystemType.Alder || tileType === EcosystemType.Acacia) {
-            nutrientMult = tileNutrients >= 70 ? 1.25 : tileNutrients <= 15 ? 0.8 : 1.0;
+            nutrientMult = tileNutrients >= 65 ? 1.25 : 1.0;
           } else {
-            if (tileNutrients >= 70) nutrientMult = 1.3;
-            else if (tileNutrients <= 15) nutrientMult = 0.1;
+            if (tileNutrients >= 65) nutrientMult = 1.25;
+            else if (tileNutrients <= 25) nutrientMult = 0.45;
           }
 
           let weatherMult = 1.0;
@@ -414,13 +412,13 @@ export function stepEcosystemTick(
 
           let willowMult = 1.0;
           if (tileType === EcosystemType.Willow) {
-            willowMult = adjacentHighMoisture || tileMoisture >= 75 ? 2.0 : 0.4;
+            willowMult = adjacentHighMoisture || tileMoisture >= 72 ? 1.9 : 0.65;
           }
 
           let bambooMult = 1.0;
           if (tileType === EcosystemType.Bamboo) {
-            if (tileMoisture >= 60) bambooMult = 2.2;
-            else if (tileMoisture <= 25) bambooMult = 0.3;
+            if (tileMoisture >= 55) bambooMult = 2.0;
+            else if (tileMoisture <= 28) bambooMult = 0.5;
           }
 
           tileProgress += config.growthRate * moistureMult * nutrientMult * weatherMult * willowMult * bambooMult;
@@ -437,65 +435,38 @@ export function stepEcosystemTick(
         }
       }
 
-      // C3. Natural Mortality
+      // C3. Gentle Natural Forest Renewal (old giants occasionally return to humus, never collapsing the canopy)
       if (tileType !== EcosystemType.None && tileType !== EcosystemType.DeadTree) {
-        let die = false;
-        let cause = '';
-
-        if (tileMoisture <= 15) {
-          const droughtCap =
-            tileType === EcosystemType.Baobab ||
-            tileType === EcosystemType.Peepal ||
-            tileType === EcosystemType.Neem ||
-            tileType === EcosystemType.Banyan
-              ? 0.004
-              : 0.035;
-          if (Math.random() < droughtCap) {
-            die = true;
-            cause = 'severe drought dehydration';
-          }
-        }
-
-        if (!die && tileNutrients <= 10 && tileStage >= 2 && Math.random() < 0.024) {
-          die = true;
-          cause = 'nutrient starvation in depleted soil';
-        }
-
-        if (!die && tileStage >= 3 && tileType !== EcosystemType.Bonsai) {
-          const ageCap = tileStage === 4 ? 0.006 : 0.0016;
+        if (tileStage >= 3 && tileType !== EcosystemType.Bonsai) {
+          const ageCap = tileStage === 4 ? 0.0045 : 0.001;
           if (Math.random() < ageCap) {
-            die = true;
-            cause = 'reaching the natural end of its life cycle';
+            const oldName = BUILDINGS[tileType]?.name || tileType;
+            pushNews(
+              `Ecosystem Cycle: An ancient ${oldName} at [${x}, ${y}] gently fell, enriching the forest floor.`,
+              'neutral'
+            );
+            tileType = EcosystemType.DeadTree;
+            tileStage = 1;
+            tileProgress = 0;
           }
-        }
-
-        if (die) {
-          const oldName = BUILDINGS[tileType]?.name || tileType;
-          pushNews(
-            `Ecosystem Cycle: The ${oldName} at [${x}, ${y}] has fallen due to ${cause}, returning as decomposing timber.`,
-            'negative'
-          );
-          tileType = EcosystemType.DeadTree;
-          tileStage = 1;
-          tileProgress = 0;
         }
       }
 
-      // C4. Optional Wild Nature Seeding (natural ecological dispersal)
+      // C4. Continuous Wild Nature Seeding (maintains lush groves & sunlit meadows automatically)
       if (
         wildSeedingEnabled &&
         wildSproutsToday < 2 &&
         tileType === EcosystemType.None &&
         !isRiver &&
-        tileMoisture >= 32 &&
-        tileNutrients >= 28
+        tileMoisture >= 28 &&
+        tileNutrients >= 25
       ) {
         const weatherSeedBoost = newWeather === 'Windy' ? 1.55 : newWeather === 'Raining' ? 1.35 : 1.0;
-        // Keep natural sunlit clearings when surrounding tiles are already dense
-        const spacingFactor = occupiedNeighborCount >= 3 ? 0.35 : 1.0;
+        // Preserve organic sunlit clearings when surrounding tiles are already dense
+        const spacingFactor = occupiedNeighborCount >= 3 ? 0.28 : 1.0;
 
         if (matureNeighborSpecies.length > 0) {
-          const spreadChance = 0.024 * weatherSeedBoost * spacingFactor;
+          const spreadChance = 0.028 * weatherSeedBoost * spacingFactor;
           if (Math.random() < spreadChance) {
             const parentSpecies =
               matureNeighborSpecies[Math.floor(Math.random() * matureNeighborSpecies.length)];
@@ -506,8 +477,7 @@ export function stepEcosystemTick(
             const name = BUILDINGS[parentSpecies]?.name || parentSpecies;
             pushNews(`Wild Seeding: Wind dispersed a ${name} sprout at [${x}, ${y}].`, 'positive');
           }
-        } else if (Math.random() < 0.0028 * weatherSeedBoost) {
-          // Rare pioneer seed carried by birds/wind suited to local soil moisture
+        } else if (Math.random() < 0.004 * weatherSeedBoost) {
           let pioneerPool: EcosystemType[];
           if (isNearRiver || tileMoisture >= 72) {
             pioneerPool = [EcosystemType.Willow, EcosystemType.Cypress, EcosystemType.Alder, EcosystemType.Bamboo];

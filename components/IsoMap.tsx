@@ -7,14 +7,22 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, OrthographicCamera } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import * as THREE from 'three';
-import { Grid, EcosystemType, WeatherType, CameraPreset } from '../types';
+import { Grid, EcosystemType, WeatherType, CameraPreset, CivilizationState } from '../types';
 import { GRID_SIZE } from '../constants';
 import { detectSoftwareWebGL, gridToWorld, RIVER_MASK } from '../utils/webgl';
+import { isTileReservedBySettlement } from '../simulation/civilization';
 import { sharedGeos } from './scene/MaterialLibrary';
 import { InstancedTerrain } from './scene/InstancedTerrain';
 import { ProceduralEnvironment, DynamicAtmosphereRig, WeatherEffects } from './scene/AtmosphereAndWeather';
-import { ProceduralTree, TreeWindController, InstancedCanopyPetals } from './scene/ProceduralTrees';
+import { ProceduralTree, TreeWindController, InstancedCanopyPetals, InstancedSnowCrowns } from './scene/ProceduralTrees';
 import { ButterflySystem, WildlifeSystem } from './scene/Wildlife';
+import { HumanCivilizationSystem } from './scene/HumanCivilization';
+import { BirdFlightSystem } from './scene/BirdFlight';
+import { wildlifeTracker } from '../simulation/wildlifeTracker';
+
+const _camDir = new THREE.Vector3();
+const _camUp = new THREE.Vector3(0, 1, 0);
+const _camRight = new THREE.Vector3();
 
 interface RippleData {
   id: number;
@@ -107,9 +115,15 @@ const CAMERA_PRESETS: Record<
   top: { pos: [0.01, 28, 4], target: [0, 0, 0], zoom: 44 },
 };
 
-const CameraRig: React.FC<{ preset: CameraPreset; presetNonce: number }> = ({ preset, presetNonce }) => {
+const CameraRig: React.FC<{
+  preset: CameraPreset;
+  presetNonce: number;
+  wildlifeCamActive: boolean;
+  trackedAnimalId: string | null;
+  onTrackedAnimalLost?: () => void;
+}> = ({ preset, presetNonce, wildlifeCamActive, trackedAnimalId, onTrackedAnimalLost }) => {
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
-  const { camera, size } = useThree();
+  const { camera, size, gl } = useThree();
 
   // Compute responsive base zoom so the entire 15x15 island fits cleanly on mobile and desktop
   const getResponsiveZoom = useCallback(
@@ -133,6 +147,9 @@ const CameraRig: React.FC<{ preset: CameraPreset; presetNonce: number }> = ({ pr
     zoom: 48,
   });
 
+  const lockZoomRef = useRef<{ active: boolean; zoom: number }>({ active: false, zoom: 92 });
+  const lostNotifiedRef = useRef(false);
+
   // Trigger smooth transition when preset or presetNonce changes
   const isFirstMount = useRef(true);
   useEffect(() => {
@@ -153,33 +170,118 @@ const CameraRig: React.FC<{ preset: CameraPreset; presetNonce: number }> = ({ pr
       return;
     }
 
+    if (wildlifeCamActive) return;
+
     transitionRef.current = {
       active: true,
       pos: new THREE.Vector3(...cfg.pos),
       target: new THREE.Vector3(...cfg.target),
       zoom: targetZoom,
     };
-  }, [preset, presetNonce, camera, getResponsiveZoom]);
+  }, [preset, presetNonce, wildlifeCamActive, camera, getResponsiveZoom]);
 
-  // Cancel scripted camera transition immediately when user grabs the scene
+  // Smooth zoom-in when locking onto a creature (user can still zoom/orbit freely afterward)
+  useEffect(() => {
+    if (wildlifeCamActive && trackedAnimalId) {
+      transitionRef.current.active = false;
+      lostNotifiedRef.current = false;
+      lockZoomRef.current = {
+        active: true,
+        zoom: getResponsiveZoom(92),
+      };
+    } else {
+      lockZoomRef.current.active = false;
+    }
+  }, [wildlifeCamActive, trackedAnimalId, getResponsiveZoom]);
+
+  // Cancel scripted camera transition when user grabs the scene; cancel lock-on zoom on wheel
   useEffect(() => {
     const ctrl = controlsRef.current;
-    if (!ctrl) return;
+    const dom = gl.domElement;
     const onStart = () => {
       transitionRef.current.active = false;
     };
-    ctrl.addEventListener('start', onStart);
-    return () => {
-      ctrl.removeEventListener('start', onStart);
+    const onWheel = () => {
+      lockZoomRef.current.active = false;
     };
-  }, []);
+    ctrl?.addEventListener('start', onStart);
+    dom.addEventListener('wheel', onWheel, { passive: true });
+    return () => {
+      ctrl?.removeEventListener('start', onStart);
+      dom.removeEventListener('wheel', onWheel);
+    };
+  }, [gl]);
 
   useFrame((_, delta) => {
-    const tr = transitionRef.current;
     const ctrl = controlsRef.current;
-    if (!tr.active || !ctrl) return;
+    if (!ctrl) return;
 
     const dt = Math.min(delta, 0.05);
+
+    // Publish camera-relative horizontal basis vectors & focus target every frame (zero GC)
+    camera.getWorldDirection(_camDir);
+    _camDir.y = 0;
+    if (_camDir.lengthSq() < 1e-6) {
+      _camDir.set(-0.707, 0, -0.707);
+    } else {
+      _camDir.normalize();
+    }
+    _camRight.crossVectors(_camDir, _camUp).normalize();
+    wildlifeTracker.setCameraBasis(
+      _camDir.x,
+      _camDir.z,
+      _camRight.x,
+      _camRight.z,
+      ctrl.target.x,
+      ctrl.target.z
+    );
+
+    // Wildlife Camera live tracking mode (preserves user orbit angle around the creature)
+    if (wildlifeCamActive && trackedAnimalId) {
+      const animal = wildlifeTracker.getAnimal(trackedAnimalId);
+      if (!animal) {
+        if (!lostNotifiedRef.current) {
+          lostNotifiedRef.current = true;
+          onTrackedAnimalLost?.();
+        }
+        return;
+      }
+
+      lostNotifiedRef.current = false;
+      const mobileYOff = size.width < 640 ? 0.85 : 0;
+      const goalX = animal.pos.x;
+      const goalY = animal.pos.y + mobileYOff;
+      const goalZ = animal.pos.z;
+
+      const nextX = THREE.MathUtils.damp(ctrl.target.x, goalX, 6.5, dt);
+      const nextY = THREE.MathUtils.damp(ctrl.target.y, goalY, 6.5, dt);
+      const nextZ = THREE.MathUtils.damp(ctrl.target.z, goalZ, 6.5, dt);
+
+      const dx = nextX - ctrl.target.x;
+      const dy = nextY - ctrl.target.y;
+      const dz = nextZ - ctrl.target.z;
+
+      ctrl.target.set(nextX, nextY, nextZ);
+      camera.position.x += dx;
+      camera.position.y += dy;
+      camera.position.z += dz;
+
+      if (lockZoomRef.current.active && 'zoom' in camera) {
+        const ortho = camera as THREE.OrthographicCamera;
+        ortho.zoom = THREE.MathUtils.damp(ortho.zoom, lockZoomRef.current.zoom, 5.2, dt);
+        ortho.updateProjectionMatrix();
+        if (Math.abs(ortho.zoom - lockZoomRef.current.zoom) < 0.35) {
+          lockZoomRef.current.active = false;
+        }
+      }
+
+      ctrl.update();
+      return;
+    }
+
+    const tr = transitionRef.current;
+    if (!tr.active) return;
+
     camera.position.x = THREE.MathUtils.damp(camera.position.x, tr.pos.x, 5.5, dt);
     camera.position.y = THREE.MathUtils.damp(camera.position.y, tr.pos.y, 5.5, dt);
     camera.position.z = THREE.MathUtils.damp(camera.position.z, tr.pos.z, 5.5, dt);
@@ -210,21 +312,24 @@ const CameraRig: React.FC<{ preset: CameraPreset; presetNonce: number }> = ({ pr
       makeDefault
       enableRotate
       enableZoom
-      enablePan
+      enablePan={!wildlifeCamActive}
       enableDamping
       dampingFactor={0.07}
       minZoom={24}
-      maxZoom={115}
+      maxZoom={135}
       maxPolarAngle={Math.PI / 2.25}
       minPolarAngle={0.22}
     />
   );
 };
 
-// Keep mobile viewport centered comfortably above the collapsible bottom dock
-const TouchInteractionOffset: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+// Keep mobile viewport centered comfortably above bottom UI (disabled in 3D Perspective Bird Flight)
+const TouchInteractionOffset: React.FC<{ disableOffset?: boolean; children: React.ReactNode }> = ({
+  disableOffset = false,
+  children,
+}) => {
   const { size } = useThree();
-  const isCompact = size.width < 640;
+  const isCompact = size.width < 640 && !disableOffset;
   return <group position={[0, isCompact ? 0.85 : 0, 0]}>{children}</group>;
 };
 
@@ -235,10 +340,16 @@ interface IsoMapProps {
   population: number;
   weather: WeatherType;
   day: number;
+  civilization: CivilizationState;
   showFertilityHeatmap?: boolean;
   onTileHover?: (coords: { x: number; y: number } | null) => void;
   cameraPreset: CameraPreset;
   cameraPresetNonce: number;
+  wildlifeCamActive: boolean;
+  trackedAnimalId: string | null;
+  onTrackedAnimalLost?: () => void;
+  plantingActive?: boolean;
+  birdMode?: boolean;
 }
 
 const IsoMap: React.FC<IsoMapProps> = React.memo(
@@ -249,10 +360,16 @@ const IsoMap: React.FC<IsoMapProps> = React.memo(
     population,
     weather,
     day,
+    civilization,
     showFertilityHeatmap = false,
     onTileHover,
     cameraPreset,
     cameraPresetNonce,
+    wildlifeCamActive,
+    trackedAnimalId,
+    onTrackedAnimalLost,
+    plantingActive = false,
+    birdMode = false,
   }) => {
     const isSoftwareGl = useMemo(() => detectSoftwareWebGL(), []);
     const [hoveredTile, setHoveredTile] = useState<{ x: number; y: number } | null>(null);
@@ -274,22 +391,24 @@ const IsoMap: React.FC<IsoMapProps> = React.memo(
 
     const handleClick = useCallback(
       (x: number, y: number) => {
-        const isRiver = RIVER_MASK[y]?.[x] ?? false;
-        const rippleColor = isRiver
-          ? '#f87171'
-          : hoveredTool === EcosystemType.WateringCan
-          ? '#38bdf8'
-          : hoveredTool === EcosystemType.NutrientMulch
-          ? '#eab308'
-          : hoveredTool === EcosystemType.None
-          ? '#ef4444'
-          : '#34d399';
+        if (plantingActive && !wildlifeCamActive) {
+          const isRiver = RIVER_MASK[y]?.[x] ?? false;
+          const rippleColor = isRiver
+            ? '#f87171'
+            : hoveredTool === EcosystemType.WateringCan
+            ? '#38bdf8'
+            : hoveredTool === EcosystemType.NutrientMulch
+            ? '#eab308'
+            : hoveredTool === EcosystemType.None
+            ? '#ef4444'
+            : '#34d399';
 
-        const id = Date.now() + Math.random();
-        setRipples((prev) => [...prev.slice(-10), { id, x, y, color: rippleColor }]);
+          const id = Date.now() + Math.random();
+          setRipples((prev) => [...prev.slice(-10), { id, x, y, color: rippleColor }]);
+        }
         onTileClick(x, y);
       },
-      [hoveredTool, onTileClick]
+      [hoveredTool, onTileClick, plantingActive, wildlifeCamActive]
     );
 
     const removeRipple = useCallback((id: number) => {
@@ -303,10 +422,14 @@ const IsoMap: React.FC<IsoMapProps> = React.memo(
       hoveredTool !== EcosystemType.DeadTree;
 
     const hoveredIsRiver = hoveredTile ? RIVER_MASK[hoveredTile.y]?.[hoveredTile.x] ?? false : false;
+    const hoveredIsSettlement = hoveredTile
+      ? isTileReservedBySettlement(civilization, hoveredTile.x, hoveredTile.y)
+      : false;
     const hoveredTileData = hoveredTile ? grid[hoveredTile.y]?.[hoveredTile.x] : null;
     const showPreview =
       Boolean(hoveredTile) &&
       !hoveredIsRiver &&
+      !hoveredIsSettlement &&
       isTreeSpecies &&
       hoveredTileData?.type === EcosystemType.None;
 
@@ -342,7 +465,7 @@ const IsoMap: React.FC<IsoMapProps> = React.memo(
             antialias: !isSoftwareGl,
             powerPreference: isSoftwareGl ? 'default' : 'high-performance',
             toneMapping: THREE.ACESFilmicToneMapping,
-            toneMappingExposure: 1.04,
+            toneMappingExposure: 1.08,
             outputColorSpace: THREE.SRGBColorSpace,
           }}
           onCreated={({ gl }) => {
@@ -358,14 +481,26 @@ const IsoMap: React.FC<IsoMapProps> = React.memo(
             canvas.addEventListener('webglcontextrestored', onRestored, false);
           }}
         >
-          <OrthographicCamera makeDefault zoom={48} position={[20, 20, 20]} near={-120} far={260} />
-          <CameraRig preset={cameraPreset} presetNonce={cameraPresetNonce} />
+          {!birdMode ? (
+            <>
+              <OrthographicCamera makeDefault zoom={48} position={[20, 20, 20]} near={-120} far={260} />
+              <CameraRig
+                preset={cameraPreset}
+                presetNonce={cameraPresetNonce}
+                wildlifeCamActive={wildlifeCamActive}
+                trackedAnimalId={trackedAnimalId}
+                onTrackedAnimalLost={onTrackedAnimalLost}
+              />
+            </>
+          ) : (
+            <BirdFlightSystem active={birdMode} grid={grid} civilization={civilization} />
+          )}
 
           {/* Procedural Studio/Sky PMREM Reflections & 60fps Zero-Rerender Celestial Rig */}
           <ProceduralEnvironment />
           <DynamicAtmosphereRig weather={weather} isSoftwareGl={isSoftwareGl} />
 
-          <TouchInteractionOffset>
+          <TouchInteractionOffset disableOffset={birdMode}>
             {/* Batched Instanced Terrain, River, Grass, Rocks & Single Picking Plane */}
             <InstancedTerrain
               grid={grid}
@@ -377,9 +512,10 @@ const IsoMap: React.FC<IsoMapProps> = React.memo(
               onClick={handleClick}
             />
 
-            {/* Single Centralized Wind Controller & Instanced Canopy Petals */}
+            {/* Single Centralized Wind & 4-Season Controller, Snow Caps & Canopy Petals */}
             <TreeWindController weather={weather} />
             <InstancedCanopyPetals grid={grid} weather={weather} />
+            <InstancedSnowCrowns grid={grid} />
 
             {/* Living Botanical Models (only mounted for occupied tiles) */}
             <group raycast={() => null}>
@@ -401,14 +537,17 @@ const IsoMap: React.FC<IsoMapProps> = React.memo(
               })}
             </group>
 
-            {/* Interactive Placement Preview & Cursor */}
-            {hoveredTile && (
+            {/* Autonomous Historical Human Civilization & Settlements */}
+            <HumanCivilizationSystem civilization={civilization} grid={grid} />
+
+            {/* Interactive Placement Preview & Cursor (only shown when optional Plant palette is open) */}
+            {hoveredTile && plantingActive && !wildlifeCamActive && !birdMode && (
               <>
                 <Cursor
                   x={hoveredTile.x}
                   y={hoveredTile.y}
                   tool={hoveredTool}
-                  isInvalidRiver={hoveredIsRiver && isTreeSpecies}
+                  isInvalidRiver={(hoveredIsRiver || hoveredIsSettlement) && isTreeSpecies}
                 />
                 {showPreview && (
                   <group position={[previewPos[0], -0.28, previewPos[2]]} raycast={() => null}>

@@ -8,8 +8,92 @@ import * as THREE from 'three';
 import { EcosystemType, Grid, WeatherType } from '../../types';
 import { BUILDINGS, GRID_SIZE } from '../../constants';
 import { getHash, getSeasonForDay, gridToWorld } from '../../utils/webgl';
-import { sharedGeos, getPooledMaterial, _dummy, _color } from './MaterialLibrary';
+import { sharedGeos, getPooledMaterial, getLeafBumpTexture, _dummy } from './MaterialLibrary';
 import { ecosystemAudio } from '../../services/audio';
+import { simClock } from '../../simulation/clock';
+
+// --- Continuous 4-Season Living Leaf Material Manager (Zero React Rerenders!) ---
+interface SeasonalMatEntry {
+  mat: THREE.MeshStandardMaterial;
+  spring: THREE.Color;
+  summer: THREE.Color;
+  autumn: THREE.Color;
+  winter: THREE.Color;
+}
+
+const EVERGREEN_SPECIES = new Set<EcosystemType>([
+  EcosystemType.Pine,
+  EcosystemType.Redwood,
+  EcosystemType.Cypress,
+  EcosystemType.Bonsai,
+  EcosystemType.Bamboo,
+]);
+
+const SEASONAL_PALETTES: Partial<
+  Record<EcosystemType, [string, string, string, string]>
+> = {
+  // [Spring, Summer, Autumn, Winter]
+  [EcosystemType.Pine]: ['#0f9d8a', '#0d7a6b', '#0f766e', '#9ec5c8'],
+  [EcosystemType.Redwood]: ['#16803d', '#14532d', '#1e6b43', '#9bbdb5'],
+  [EcosystemType.Cypress]: ['#148f82', '#0f766e', '#115e59', '#9bc2c7'],
+  [EcosystemType.Oak]: ['#4ade80', '#16a34a', '#d97706', '#cbd5e1'],
+  [EcosystemType.Maple]: ['#84cc16', '#22c55e', '#ea580c', '#d6c8bc'],
+  [EcosystemType.Birch]: ['#bef264', '#65a30d', '#facc15', '#e2e8f0'],
+  [EcosystemType.CherryBlossom]: ['#f472b6', '#4ade80', '#fb7185', '#f1f5f9'],
+  [EcosystemType.Jacaranda]: ['#c084fc', '#9333ea', '#a855f7', '#e2ddf7'],
+  [EcosystemType.Willow]: ['#34d399', '#14b8a6', '#eab308', '#cbd5e1'],
+  [EcosystemType.Alder]: ['#4ade80', '#22c55e', '#ca8a04', '#cbd5e1'],
+  [EcosystemType.Acacia]: ['#a3e635', '#84cc16', '#d97706', '#d4cfc5'],
+  [EcosystemType.Baobab]: ['#10b981', '#047857', '#b45309', '#c7c2b8'],
+  [EcosystemType.Bonsai]: ['#84cc16', '#65a30d', '#84a92c', '#bcd4c8'],
+  [EcosystemType.Bamboo]: ['#bef264', '#84cc16', '#a3c639', '#c8dec4'],
+  [EcosystemType.Peepal]: ['#4ade80', '#22c55e', '#f59e0b', '#cbd5e1'],
+  [EcosystemType.Neem]: ['#22c55e', '#15803d', '#84a92c', '#b7ccc2'],
+  [EcosystemType.Banyan]: ['#16a34a', '#166534', '#65a30d', '#b0c9be'],
+};
+
+const seasonalLeafPool = new Map<string, SeasonalMatEntry>();
+
+function getSeasonalLeafMaterial(type: EcosystemType, hash: number): THREE.MeshStandardMaterial {
+  const shadeIdx = Math.floor(hash * 3) % 3;
+  const key = `${type}_${shadeIdx}`;
+  const cached = seasonalLeafPool.get(key);
+  if (cached) return cached.mat;
+
+  const palette = SEASONAL_PALETTES[type] || [
+    BUILDINGS[type]?.color || '#22c55e',
+    BUILDINGS[type]?.color || '#16a34a',
+    '#d97706',
+    '#cbd5e1',
+  ];
+
+  // Subtle deterministic hue/lightness variance per shade bucket for natural organic depth
+  const deltaH = (shadeIdx - 1) * 0.018;
+  const deltaL = (shadeIdx - 1) * 0.032;
+
+  const makeCol = (hex: string) => {
+    const c = new THREE.Color(hex);
+    c.offsetHSL(deltaH, 0, deltaL);
+    return c;
+  };
+
+  const spring = makeCol(palette[0]);
+  const summer = makeCol(palette[1]);
+  const autumn = makeCol(palette[2]);
+  const winter = makeCol(palette[3]);
+
+  const mat = new THREE.MeshStandardMaterial({
+    color: spring.clone(),
+    roughness: 0.68,
+    metalness: 0.03,
+    bumpMap: getLeafBumpTexture(),
+    bumpScale: 0.028,
+    flatShading: false,
+  });
+
+  seasonalLeafPool.set(key, { mat, spring, summer, autumn, winter });
+  return mat;
+}
 
 // --- Centralized Tree Animation Registry (ONE useFrame updates ALL planted trees!) ---
 interface AnimatedTreeEntry {
@@ -82,7 +166,36 @@ export const TreeWindController: React.FC<{ weather: WeatherType }> = ({ weather
   useFrame((state, delta) => {
     const dt = Math.min(delta, 0.05);
     const time = state.clock.getElapsedTime();
+    const sw = simClock.getSeasonWeights();
 
+    // 1. Continuously blend all 4-season living leaf materials at 60fps (zero React re-renders!)
+    const colAlpha = 1 - Math.exp(-4.5 * dt);
+    seasonalLeafPool.forEach((entry) => {
+      const tr =
+        entry.spring.r * sw.spring +
+        entry.summer.r * sw.summer +
+        entry.autumn.r * sw.autumn +
+        entry.winter.r * sw.winter;
+      const tg =
+        entry.spring.g * sw.spring +
+        entry.summer.g * sw.summer +
+        entry.autumn.g * sw.autumn +
+        entry.winter.g * sw.winter;
+      const tb =
+        entry.spring.b * sw.spring +
+        entry.summer.b * sw.summer +
+        entry.autumn.b * sw.autumn +
+        entry.winter.b * sw.winter;
+
+      entry.mat.color.r += (tr - entry.mat.color.r) * colAlpha;
+      entry.mat.color.g += (tg - entry.mat.color.g) * colAlpha;
+      entry.mat.color.b += (tb - entry.mat.color.b) * colAlpha;
+      // Slightly shinier frost sheen in winter
+      const targetRoughness = 0.72 - sw.winter * 0.14;
+      entry.mat.roughness = THREE.MathUtils.damp(entry.mat.roughness, targetRoughness, 4, dt);
+    });
+
+    // 2. Wind physics + seasonal canopy fullness across all registered living trees
     let windSpeedMult = 0.95;
     let windAmtMult = 0.85;
     let waveFreq = 0.65;
@@ -121,6 +234,16 @@ export const TreeWindController: React.FC<{ weather: WeatherType }> = ({ weather
         const flutter = Math.sin(time * 5.0 + entry.hash * 12) * (0.005 * windAmtMult) * gust;
         entry.canopy.rotation.z = Math.sin(time * cs + entry.hash * 7) * ca + flutter;
         entry.canopy.rotation.x = Math.cos(time * cs * 1.1 + entry.hash * 4) * (ca * 0.45) + flutter;
+
+        // Subtle seasonal fullness: deciduous canopies thin out slightly in Winter and bloom lush in Summer
+        const isEvergreen = EVERGREEN_SPECIES.has(entry.type);
+        const baseCanopyScale = entry.growthStage === 4 ? 1.36 : 1.0;
+        const seasonScaleMul = isEvergreen
+          ? 1.0
+          : 1.0 * sw.spring + 1.05 * sw.summer + 0.96 * sw.autumn + 0.78 * sw.winter;
+        const targetCanopyS = baseCanopyScale * seasonScaleMul;
+        const nextCS = THREE.MathUtils.damp(entry.canopy.scale.x, targetCanopyS, 3.8, dt);
+        entry.canopy.scale.setScalar(nextCS);
       }
 
       if (entry.branch1) {
@@ -144,6 +267,93 @@ export const TreeWindController: React.FC<{ weather: WeatherType }> = ({ weather
 
   return null;
 };
+
+// --- Single-Draw-Call Instanced Winter Snow Caps on Living Tree Crowns ---
+const MAX_SNOW_CAPS = GRID_SIZE * GRID_SIZE;
+
+export const InstancedSnowCrowns: React.FC<{ grid: Grid }> = React.memo(({ grid }) => {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+
+  const caps = useMemo(() => {
+    const list: { wx: number; wz: number; y: number; rx: number; ry: number; rz: number }[] = [];
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        const tile = grid[y][x];
+        if (tile.type === EcosystemType.None || tile.type === EcosystemType.DeadTree || tile.growthStage < 2) {
+          continue;
+        }
+        const [wx, , wz] = gridToWorld(x, y);
+        const isAncient = tile.growthStage === 4;
+        const stageScale = tile.growthStage === 2 ? 0.55 : isAncient ? 1.55 : 1.0;
+        const isTall =
+          tile.type === EcosystemType.Redwood ||
+          tile.type === EcosystemType.Pine ||
+          tile.type === EcosystemType.Cypress;
+
+        const crownY = -0.3 + (isTall ? 1.85 : 1.32) * stageScale;
+        const radius = (isTall ? 0.48 : 0.68) * stageScale;
+        list.push({
+          wx,
+          wz,
+          y: crownY,
+          rx: radius,
+          ry: radius * 0.28,
+          rz: radius,
+        });
+      }
+    }
+    return list;
+  }, [grid]);
+
+  const snowCapMat = useMemo(
+    () =>
+      new THREE.MeshStandardMaterial({
+        color: '#f8fafc',
+        roughness: 0.75,
+        metalness: 0.05,
+        flatShading: true,
+        transparent: true,
+        opacity: 0,
+      }),
+    []
+  );
+
+  useEffect(() => () => snowCapMat.dispose(), [snowCapMat]);
+
+  useFrame((_, delta) => {
+    if (!meshRef.current) return;
+    const dt = Math.min(delta, 0.05);
+    const sw = simClock.getSeasonWeights();
+    const targetAmt = sw.winter > 0.28 ? Math.min(1, (sw.winter - 0.28) / 0.52) : 0;
+    snowCapMat.opacity = THREE.MathUtils.damp(snowCapMat.opacity, targetAmt * 0.92, 3.0, dt);
+
+    const visible = snowCapMat.opacity > 0.02 && caps.length > 0;
+    meshRef.current.visible = visible;
+    if (!visible) return;
+
+    meshRef.current.count = caps.length;
+    const scaleFactor = 0.55 + snowCapMat.opacity * 0.48;
+    for (let i = 0; i < caps.length; i++) {
+      const c = caps[i];
+      _dummy.position.set(c.wx, c.y, c.wz);
+      _dummy.rotation.set(0, i * 0.7, 0);
+      _dummy.scale.set(c.rx * scaleFactor, c.ry * scaleFactor, c.rz * scaleFactor);
+      _dummy.updateMatrix();
+      meshRef.current.setMatrixAt(i, _dummy.matrix);
+    }
+    meshRef.current.instanceMatrix.needsUpdate = true;
+  });
+
+  return (
+    <instancedMesh
+      ref={meshRef}
+      args={[sharedGeos.sphere, snowCapMat, MAX_SNOW_CAPS]}
+      frustumCulled={false}
+      raycast={() => null}
+      visible={false}
+    />
+  );
+});
 
 // --- Instanced Canopy Petal Fall System (1 Draw Call for ALL flowering/autumn trees!) ---
 const MAX_PETALS = 180;
@@ -513,23 +723,29 @@ export const ProceduralTree: React.FC<ProceduralTreeProps> = React.memo(
       };
     }, [type, growthStage, x, y, hash, scaleMultiplier, isPreview]);
 
-    // Pooled materials (zero leaks, crisp roughness contrast between bark & foliage)
+    // Pooled materials: living non-preview trees use continuous 60fps seasonal materials!
     const { leavesMat, barkMat, deadWoodMat, blossomMat, orangeFungiMat, goldFungiMat, redFungiMat, cyanFungiMat, stemMat, ringMat } =
       useMemo(() => {
         const lCol = computeLeafColor(type, hash, weather, day);
         const barkCategory =
           type === EcosystemType.Birch ? 'birchBark' : type === EcosystemType.Bamboo ? 'bambooBark' : 'bark';
+        const tmpColor = new THREE.Color();
         const barkHex =
           type === EcosystemType.Birch
-            ? _color.set('#e2e8f0').multiplyScalar(0.92 + hash * 0.08)
+            ? tmpColor.set('#e2e8f0').multiplyScalar(0.92 + hash * 0.08)
             : type === EcosystemType.Bamboo
-            ? _color.set('#65a30d').multiplyScalar(0.85 + hash * 0.15)
+            ? tmpColor.set('#65a30d').multiplyScalar(0.85 + hash * 0.15)
             : type === EcosystemType.Redwood
-            ? _color.set('#7c2d12').multiplyScalar(0.8 + hash * 0.2)
-            : _color.set('#78350f').multiplyScalar(0.72 + hash * 0.28);
+            ? tmpColor.set('#7c2d12').multiplyScalar(0.8 + hash * 0.2)
+            : tmpColor.set('#78350f').multiplyScalar(0.72 + hash * 0.28);
+
+        const resolvedLeavesMat =
+          !isPreview && !transparent && opacity >= 0.99 && type !== EcosystemType.DeadTree
+            ? getSeasonalLeafMaterial(type, hash)
+            : getPooledMaterial('leaf', lCol, { opacity, transparent });
 
         return {
-          leavesMat: getPooledMaterial('leaf', lCol, { opacity, transparent }),
+          leavesMat: resolvedLeavesMat,
           barkMat: getPooledMaterial(barkCategory, barkHex, { opacity, transparent }),
           deadWoodMat: getPooledMaterial('deadWood', '#574c40', { opacity, transparent }),
           blossomMat: getPooledMaterial('blossom', '#fbcfe8', { opacity, transparent }),
@@ -545,7 +761,7 @@ export const ProceduralTree: React.FC<ProceduralTreeProps> = React.memo(
             emissiveIntensity: 0.55,
           }),
         };
-      }, [type, hash, weather, day, opacity, transparent]);
+      }, [type, hash, weather, day, opacity, transparent, isPreview]);
 
     const isAncient = growthStage === 4;
     const trunkMul = isAncient ? 1.32 : 1.0;
